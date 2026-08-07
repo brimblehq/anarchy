@@ -1,0 +1,76 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+
+project_name: brimble
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: brimble
+    main: ./cmd/brimble
+    binary: brimble
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/brimbleapp/brimble-cli/internal/cmd.version={{.Version}}
+      - -X github.com/brimbleapp/brimble-cli/internal/cmd.commit={{.ShortCommit}}
+      - -X github.com/brimbleapp/brimble-cli/internal/cmd.date={{.Date}}
+
+archives:
+  - formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+      {{- if .Arm }}v{{ .Arm }}{{ end }}
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+      - "^chore:"
+
+release:
+  footer: >-
+
+    ---
+
+    ## Install
+
+    Download the archive for your OS/arch from the assets above, extract it, and put `brimble` on your `PATH`.
+
+    ```bash
+    # macOS / Linux example
+    tar -xzf brimble_*.tar.gz
+    sudo mv brimble /usr/local/bin/
+    brimble --version
+    ```
+
+    Or install from source:
+
+    ```bash
+    go install github.com/brimbleapp/brimble-cli/cmd/brimble@{{ .Tag }}
+    ```
