@@ -111,7 +111,7 @@ func newStatusCmd() *cobra.Command {
 				if err := printProjectView(project); err != nil {
 					return err
 				}
-				ui.Section("Recent deployments")
+				ui.Muted("Recent deployments")
 				list := deployments(logs)
 				if len(list) == 0 {
 					ui.Muted("  None yet — run `brimble deploy`")

@@ -60,9 +60,12 @@ func printProjectView(p client.Project) error {
 	if p.PreviewDeploymentsEnabled {
 		printKV("Previews", "on")
 	}
+	isDB := p.ServiceType == "database"
 	printKV("Type", joinNonEmpty(" · ", p.ServiceType, p.Framework))
 	printKV("Public", yesNo(p.Public))
-	printKV("Maintenance", yesNo(p.Maintenance))
+	if !isDB {
+		printKV("Maintenance", yesNo(p.Maintenance))
+	}
 	printKV("Created", formatTime(p.CreatedAt))
 	printKV("Updated", formatTime(p.UpdatedAt))
 
@@ -82,17 +85,21 @@ func printProjectView(p client.Project) error {
 		printKV("Memory", formatMemory(p.Specs.Memory))
 		printKV("Region", p.Specs.Region.Name)
 		if disk := formatFloat(p.DiskSize); disk != "" && disk != "0" {
-			printKV("Disk", disk)
+			printKV("Disk", disk+" GB")
 		}
 	}
 
-	ui.Section("Deploy")
-	printKV("Health", formatHealth(p.Health))
-	if p.Log != nil {
-		printKV("Last commit", truncate(firstLine(p.Log.Message), 80))
+	if isDB {
+		fmt.Fprintln(os.Stdout)
+		ui.Muted("  Connection details, backups and users are in the dashboard: https://app.brimble.io")
+	} else {
+		ui.Section("Deploy")
+		printKV("Health", formatHealth(p.Health))
+		if p.Log != nil {
+			printKV("Last commit", truncate(firstLine(p.Log.Message), 80))
+		}
+		printKV("Serving", yesNo(p.ReplicaReady))
 	}
-	printKV("In cluster", yesNo(p.DeployedInCluster))
-	printKV("Replica ready", yesNo(p.ReplicaReady))
 
 	if p.InstallCommand != "" || p.BuildCommand != "" || p.StartCommand != "" || p.RootDirectory != "" || p.OutputDirectory != "" {
 		ui.Section("Build")
@@ -167,14 +174,24 @@ func formatMemory(v float64) string {
 	return s + " GB"
 }
 
+// formatHealth colors the latest health check: passing, warning or critical.
 func formatHealth(h client.HealthStatus) string {
 	if h.Status == "" {
 		return ""
 	}
+	label := h.Status
 	if h.StatusCode != 0 {
-		return h.Status + " (" + strconv.Itoa(h.StatusCode) + ")"
+		label += " (HTTP " + strconv.Itoa(h.StatusCode) + ")"
 	}
-	return h.Status
+	switch h.Status {
+	case "passing":
+		return ui.Green("● " + label)
+	case "warning":
+		return ui.Yellow("● " + label)
+	case "critical":
+		return ui.Red("● "+label) + ui.Dim("  the health check path is failing")
+	}
+	return label
 }
 
 func formatTime(raw string) string {

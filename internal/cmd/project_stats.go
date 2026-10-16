@@ -1,9 +1,11 @@
 package cmd
 
 import (
+	"cmp"
 	"fmt"
 	"math"
 	"os"
+	"strconv"
 
 	"github.com/brimblehq/anarchy/internal/client"
 	"github.com/brimblehq/anarchy/internal/ui"
@@ -15,17 +17,14 @@ func printProjectStats(project string, stats client.ProjectStats) error {
 	}
 	ui.Title(project + " · stats")
 
-	printKV("Type", stats.ServiceType)
-	printKV("Live", yesNo(stats.Live))
-	printKV("Supported", yesNo(stats.Supported))
-
-	if stats.Range.From != "" || stats.Range.To != "" || stats.Range.Step != "" {
-		ui.Section("Range")
-		printKV("From", formatTime(stats.Range.From))
-		printKV("To", formatTime(stats.Range.To))
-		if step := stats.Range.Step.String(); step != "" {
-			printKV("Step", step+"s")
-		}
+	if !stats.Supported {
+		ui.Muted("  Metrics aren't available for this %s project.", cmp.Or(stats.ServiceType, "type of"))
+		fmt.Fprintln(os.Stdout)
+		return nil
+	}
+	if stats.Range.From != "" && stats.Range.To != "" {
+		printKV("Window", formatClock(stats.Range.From)+" → "+formatClock(stats.Range.To))
+		ui.Muted("  ↑/↓ compare with the previous window of the same length.")
 	}
 
 	s := stats.Summary
@@ -71,21 +70,18 @@ func printMetricKV(key string, m client.Metric, format func(float64) string) {
 		return
 	}
 	out := format(*m.Value)
-	if m.Delta != nil {
-		out += "  ·  " + signedMetric(*m.Delta, format)
+	if *m.Value == 0 {
+		out = "0"
+	}
+	// Delta is a relative change in percent, whatever the metric's unit.
+	if m.Delta != nil && math.Abs(*m.Delta) >= 0.5 {
+		arrow := "↑ "
+		if *m.Delta < 0 {
+			arrow = "↓ "
+		}
+		out += "  " + ui.Dim(arrow+strconv.FormatFloat(math.Round(math.Abs(*m.Delta)), 'f', -1, 64)+"%")
 	}
 	printKV(key, out)
-}
-
-func signedMetric(v float64, format func(float64) string) string {
-	s := format(math.Abs(v))
-	if v > 0 {
-		return "+" + s
-	}
-	if v < 0 {
-		return "-" + s
-	}
-	return s
 }
 
 func formatPercent(v float64) string {

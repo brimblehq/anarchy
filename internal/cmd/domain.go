@@ -33,6 +33,7 @@ type domainRef struct {
 	ProjectName string
 	Primary     bool
 	Active      bool
+	Custom      bool // false for built-in *.brimble.app addresses
 }
 
 func domainRefs(list client.DomainList) []domainRef {
@@ -47,6 +48,7 @@ func domainRefs(list client.DomainList) []domainRef {
 			ProjectID: d.Project,
 			Primary:   d.Primary,
 			Active:    d.Active,
+			Custom:    d.Custom,
 		})
 	}
 	return out
@@ -110,9 +112,14 @@ func newDomainListCmd() *cobra.Command {
 				}
 				rows := make([][]string, 0, len(domains))
 				for _, d := range domains {
-					status := ui.Yellow("pending DNS")
-					if d.Active {
+					var status string
+					switch {
+					case !d.Custom:
+						status = ui.Dim("built-in")
+					case d.Active:
 						status = ui.Green("active")
+					default:
+						status = ui.Yellow("pending DNS")
 					}
 					primary := " "
 					if d.Primary {
