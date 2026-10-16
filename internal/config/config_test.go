@@ -75,8 +75,82 @@ func TestSaveAndClearCredentials(t *testing.T) {
 	if fc.APIKey != "" {
 		t.Fatalf("api key should be cleared, got %q", fc.APIKey)
 	}
-	if fc.TeamID != "team1" {
-		t.Fatalf("team should remain, got %q", fc.TeamID)
+	if fc.TeamID != "" || fc.TeamName != "" {
+		t.Fatalf("team belongs to the logged-out account and should be cleared, got %+v", fc)
 	}
 	_ = os.Remove(path)
+}
+
+func TestTeamPrecedenceLinkOverConfigFile(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("HOME", dir)
+	t.Setenv("BRIMBLE_TEAM_ID", "")
+	path, err := defaultConfigPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveTeam(path, "file-team", "Acme"); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(Overrides{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TeamID != "file-team" || cfg.TeamName != "Acme" || cfg.TeamSource != "config" {
+		t.Fatalf("got team %q name %q source %q", cfg.TeamID, cfg.TeamName, cfg.TeamSource)
+	}
+
+	cfg, err = Load(Overrides{LinkTeamID: "link-team"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TeamID != "link-team" || cfg.TeamSource != "link" || cfg.TeamName != "" {
+		t.Fatalf("got team %q name %q source %q", cfg.TeamID, cfg.TeamName, cfg.TeamSource)
+	}
+
+	if err := SaveTeam(path, "", "ignored"); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = Load(Overrides{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TeamID != "" || cfg.TeamSource != "" {
+		t.Fatalf("expected personal workspace, got %q (%s)", cfg.TeamID, cfg.TeamSource)
+	}
+}
+
+func TestLinkRoundTripFromSubdirectory(t *testing.T) {
+	root := t.TempDir()
+	if _, ok := mustFind(t, root); ok {
+		t.Fatal("expected no link")
+	}
+	if _, err := SaveLink(root, Link{ProjectID: "p1", ProjectName: "web", TeamID: "t1"}); err != nil {
+		t.Fatal(err)
+	}
+	sub := filepath.Join(root, "src", "app")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link, ok := mustFind(t, sub)
+	if !ok || link.ProjectID != "p1" || link.ProjectName != "web" || link.TeamID != "t1" {
+		t.Fatalf("got %+v ok=%v", link, ok)
+	}
+	if err := RemoveLink(root); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := mustFind(t, sub); ok {
+		t.Fatal("link should be removed")
+	}
+}
+
+func mustFind(t *testing.T, dir string) (Link, bool) {
+	t.Helper()
+	link, _, ok, err := FindLink(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return link, ok
 }

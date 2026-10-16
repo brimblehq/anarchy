@@ -25,13 +25,9 @@ var (
 	styleVal   = lipgloss.NewStyle().Bold(true)
 )
 
-func Brand(msg string) string {
-	return styleBrand.Render(msg)
-}
-
 func Success(format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
-	fmt.Fprintln(os.Stdout, styleOK.Render("✓")+" "+msg)
+	fmt.Fprintln(os.Stderr, styleOK.Render("✓")+" "+msg)
 }
 
 func Error(format string, args ...any) {
@@ -41,12 +37,12 @@ func Error(format string, args ...any) {
 
 func Warn(format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
-	fmt.Fprintln(os.Stdout, styleWarn.Render("!")+" "+msg)
+	fmt.Fprintln(os.Stderr, styleWarn.Render("!")+" "+msg)
 }
 
 func Info(format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
-	fmt.Fprintln(os.Stdout, styleInfo.Render("→")+" "+msg)
+	fmt.Fprintln(os.Stderr, styleInfo.Render("→")+" "+msg)
 }
 
 func Muted(format string, args ...any) {

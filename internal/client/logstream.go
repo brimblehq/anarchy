@@ -3,8 +3,10 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -22,14 +24,14 @@ type LogLine struct {
 }
 
 type StreamLogsOpts struct {
-	ProjectID string
-	Query string
-	StartNs int64
-	Limit int
-	APIKey string
+	ProjectID   string
+	Query       string
+	StartNs     int64
+	Limit       int
+	APIKey      string
 	CoreBaseURL string
-	OnLine func(LogLine)
-	OnError func(error)
+	OnLine      func(LogLine)
+	OnError     func(error)
 }
 
 func StreamLogs(ctx context.Context, opts StreamLogsOpts) error {
@@ -46,7 +48,7 @@ func StreamLogs(ctx context.Context, opts StreamLogsOpts) error {
 		opts.Limit = 150
 	}
 	if opts.StartNs <= 0 {
-		opts.StartNs = time.Now().Add(-1*time.Hour).UnixNano()
+		opts.StartNs = time.Now().Add(-1 * time.Hour).UnixNano()
 	}
 
 	uri, path, err := logsSocketEndpoint(opts.CoreBaseURL)
@@ -82,8 +84,8 @@ func StreamLogs(ctx context.Context, opts StreamLogsOpts) error {
 	emitTail := func(...any) {
 		params := map[string]any{
 			"projectId": opts.ProjectID,
-			"start":     fmt.Sprintf("%d", opts.StartNs),
-			"limit":     fmt.Sprintf("%d", opts.Limit),
+			"start":     strconv.FormatInt(opts.StartNs, 10),
+			"limit":     strconv.Itoa(opts.Limit),
 			"delay_for": "0",
 		}
 		if opts.Query != "" {
@@ -91,8 +93,12 @@ func StreamLogs(ctx context.Context, opts StreamLogsOpts) error {
 		}
 		s.Emit("tail", params)
 	}
+	// Core emits "connected" once its upstream Loki tail is open; the tail
+	// request itself goes out on the socket "connect" event.
 	s.On("connect", emitTail)
-	s.On("connected", emitTail)
+	s.On("disconnected", func(...any) {
+		fail(errors.New("log stream closed by the server"))
+	})
 	s.On("logs", func(args ...any) {
 		if len(args) == 0 {
 			return
@@ -108,25 +114,29 @@ func StreamLogs(ctx context.Context, opts StreamLogsOpts) error {
 			msg = "log stream error"
 		}
 		if opts.OnError != nil {
-			opts.OnError(fmt.Errorf("%s", msg))
+			opts.OnError(errors.New(msg))
 		}
 	})
 
 	s.On("connect_error", func(args ...any) {
 		msg := extractSocketMessage(args)
 		if msg == "" {
-			msg = "failed to connect to log stream"
+			msg = "connection refused"
 		}
-		fail(fmt.Errorf("%s", msg))
+		fail(fmt.Errorf("could not connect to the log stream: %s", msg))
 	})
 
 	s.On("disconnect", func(args ...any) {
 		msg := extractSocketMessage(args)
-		if msg == "" || msg == "io client disconnect" {
+		// Only our own Close() is a clean end; anything else lost the stream.
+		if msg == "io client disconnect" {
 			fail(nil)
 			return
 		}
-		fail(fmt.Errorf("disconnected: %s", msg))
+		if msg == "" {
+			msg = "connection lost"
+		}
+		fail(fmt.Errorf("log stream disconnected: %s", msg))
 	})
 
 	select {
@@ -161,21 +171,18 @@ func logsSocketEndpoint(coreBaseURL string) (origin string, socketIOPath string,
 }
 
 func parseLokiPayload(payload any) []LogLine {
-	var raw any = payload
+	var raw []byte
 	switch t := payload.(type) {
 	case string:
-		if err := json.Unmarshal([]byte(t), &raw); err != nil {
-			return nil
-		}
+		raw = []byte(t)
 	case []byte:
-		if err := json.Unmarshal(t, &raw); err != nil {
+		raw = t
+	default:
+		var err error
+		raw, err = json.Marshal(t)
+		if err != nil {
 			return nil
 		}
-	}
-
-	b, err := json.Marshal(raw)
-	if err != nil {
-		return nil
 	}
 	var envelope struct {
 		Streams []struct {
@@ -183,7 +190,7 @@ func parseLokiPayload(payload any) []LogLine {
 			Values [][]string        `json:"values"`
 		} `json:"streams"`
 	}
-	if err := json.Unmarshal(b, &envelope); err != nil {
+	if err := json.Unmarshal(raw, &envelope); err != nil {
 		return nil
 	}
 
@@ -235,23 +242,6 @@ func extractSocketMessage(args []any) string {
 		case map[string]any:
 			if m, ok := t["message"].(string); ok && m != "" {
 				return m
-			}
-			if m, ok := t["reason"].(string); ok && m != "" {
-				return m
-			}
-		default:
-			b, err := json.Marshal(t)
-			if err == nil {
-				var m map[string]any
-				if json.Unmarshal(b, &m) == nil {
-					if msg, ok := m["message"].(string); ok && msg != "" {
-						return msg
-					}
-				}
-			}
-			s := fmt.Sprint(t)
-			if s != "" && s != "<nil>" {
-				return s
 			}
 		}
 	}

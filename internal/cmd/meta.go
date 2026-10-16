@@ -2,9 +2,11 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 
+	"github.com/brimbleapp/brimble-cli/internal/client"
 	"github.com/brimbleapp/brimble-cli/internal/ui"
 	"github.com/spf13/cobra"
 )
@@ -20,16 +22,37 @@ func newMetaCmd() *cobra.Command {
 		Short: "List regions",
 		Run: func(cmd *cobra.Command, args []string) {
 			run(func(ctx context.Context) error {
-				var data any
+				var catalog client.RegionCatalog
 				err := ui.WithSpinner("Loading regions…", func() error {
 					var err error
-					data, err = coreClient.GetRegions(ctx)
+					catalog, err = coreClient.GetRegions(ctx)
 					return err
 				})
 				if err != nil {
 					return err
 				}
-				return printResult(data)
+				if jsonOutput() {
+					return printResult(catalog)
+				}
+				var rows [][]string
+				for _, r := range catalog.Regions() {
+					status := ui.Green("available")
+					switch {
+					case !r.Enabled || !r.Available:
+						status = ui.Dim("unavailable")
+					case r.Eligible != nil && !*r.Eligible:
+						status = ui.Yellow("not in your plan")
+					}
+					name := r.Name
+					if r.Default {
+						name += ui.Dim(" (default)")
+					}
+					rows = append(rows, []string{name, r.Type, r.Country, r.Provider, status, r.ID})
+				}
+				fmt.Fprintln(os.Stdout)
+				ui.Table([]string{"REGION", "FOR", "COUNTRY", "PROVIDER", "STATUS", "ID"}, rows)
+				fmt.Fprintln(os.Stdout)
+				return nil
 			})
 		},
 	})
@@ -39,7 +62,7 @@ func newMetaCmd() *cobra.Command {
 		Short: "List plans",
 		Run: func(cmd *cobra.Command, args []string) {
 			run(func(ctx context.Context) error {
-				var data any
+				var data json.RawMessage
 				err := ui.WithSpinner("Loading plans…", func() error {
 					var err error
 					data, err = coreClient.GetPlans(ctx)
@@ -58,19 +81,23 @@ func newMetaCmd() *cobra.Command {
 		Short: "List frameworks",
 		Run: func(cmd *cobra.Command, args []string) {
 			run(func(ctx context.Context) error {
-				var data any
+				var frameworks []client.Framework
 				err := ui.WithSpinner("Loading frameworks…", func() error {
 					var err error
-					data, err = coreClient.GetFrameworks(ctx)
+					frameworks, err = coreClient.GetFrameworks(ctx)
 					return err
 				})
 				if err != nil {
 					return err
 				}
+				slugs := frameworkSlugs(frameworks)
 				if cfg.Output == "json" {
-					return printResult(slugsOnly(data))
+					return printResult(slugs)
 				}
-				return printSlugs(data)
+				for _, slug := range slugs {
+					fmt.Fprintln(os.Stdout, slug)
+				}
+				return nil
 			})
 		},
 	})
@@ -78,27 +105,12 @@ func newMetaCmd() *cobra.Command {
 	return cmd
 }
 
-func slugsOnly(data any) []string {
-	items := asSlice(unwrapList(data))
-	out := make([]string, 0, len(items))
-	for _, item := range items {
-		switch t := item.(type) {
-		case string:
-			if t != "" {
-				out = append(out, t)
-			}
-		case map[string]any:
-			if slug := firstString(t, "slug"); slug != "" {
-				out = append(out, slug)
-			}
+func frameworkSlugs(frameworks []client.Framework) []string {
+	out := make([]string, 0, len(frameworks))
+	for _, f := range frameworks {
+		if f.Slug != "" {
+			out = append(out, f.Slug)
 		}
 	}
 	return out
-}
-
-func printSlugs(data any) error {
-	for _, slug := range slugsOnly(data) {
-		fmt.Fprintln(os.Stdout, slug)
-	}
-	return nil
 }

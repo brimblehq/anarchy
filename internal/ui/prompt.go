@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
@@ -87,6 +88,9 @@ func Select(title string, options []Option) (string, error) {
 		return "", fmt.Errorf("nothing to select")
 	}
 	if len(options) == 1 {
+		if IsInteractive() {
+			fmt.Fprintf(os.Stderr, "%s %s\n", styleMuted.Render(strings.TrimSuffix(title, "?")+":"), options[0].Label)
+		}
 		return options[0].Value, nil
 	}
 	if !IsInteractive() {
@@ -109,7 +113,7 @@ func Select(title string, options []Option) (string, error) {
 	return value, err
 }
 
-func LoginForm(apiKey, teamID *string) error {
+func LoginForm(apiKey *string) error {
 	if !IsInteractive() {
 		return fmt.Errorf("not a terminal; pass --api-key or set BRIMBLE_API_KEY")
 	}
@@ -125,16 +129,11 @@ func LoginForm(apiKey, teamID *string) error {
 				EchoMode(huh.EchoModePassword).
 				Value(apiKey).
 				Validate(func(s string) error {
-					if s == "" {
+					if strings.TrimSpace(s) == "" {
 						return fmt.Errorf("API key is required")
 					}
 					return nil
 				}),
-			huh.NewInput().
-				Title("Default team ID").
-				Description("Optional — leave empty to skip").
-				Placeholder("optional").
-				Value(teamID),
 		),
 	).WithTheme(compactTheme()).Run()
 }

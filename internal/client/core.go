@@ -20,7 +20,3 @@ func NewCore(baseURL string, timeout time.Duration, creds auth.Credentials, user
 		}),
 	}
 }
-
-func (c *Core) HTTP() *HTTPClient {
-	return c.http
-}

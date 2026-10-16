@@ -1,6 +1,7 @@
 package config
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -17,13 +18,16 @@ const (
 )
 
 type FileConfig struct {
-	APIKey string `json:"api_key,omitempty"`
-	TeamID string `json:"team_id,omitempty"`
+	APIKey   string `json:"api_key,omitempty"`
+	TeamID   string `json:"team_id,omitempty"`
+	TeamName string `json:"team_name,omitempty"`
 }
 
 type Config struct {
 	APIKey      string
 	TeamID      string
+	TeamName    string // display name of TeamID, when known
+	TeamSource  string // flag, env, link, config or "" (personal workspace)
 	CoreBaseURL string
 	AuthBaseURL string
 	Output      string
@@ -34,6 +38,7 @@ type Config struct {
 type Overrides struct {
 	APIKey      string
 	TeamID      string
+	LinkTeamID  string // team of the project linked to the working directory
 	CoreBaseURL string
 	AuthBaseURL string
 	Output      string
@@ -49,13 +54,26 @@ func Load(over Overrides) (Config, error) {
 	file, _ := readFile(path)
 
 	cfg := Config{
-		APIKey:      firstNonEmpty(over.APIKey, os.Getenv("BRIMBLE_API_KEY"), file.APIKey),
-		TeamID:      firstNonEmpty(over.TeamID, os.Getenv("BRIMBLE_TEAM_ID"), file.TeamID),
-		CoreBaseURL: strings.TrimRight(firstNonEmpty(over.CoreBaseURL, os.Getenv("BRIMBLE_CORE_BASE_URL"), defaultCoreBaseURL), "/"),
-		AuthBaseURL: strings.TrimRight(firstNonEmpty(over.AuthBaseURL, os.Getenv("BRIMBLE_AUTH_BASE_URL"), defaultAuthBaseURL), "/"),
-		Output:      firstNonEmpty(over.Output, defaultOutput),
+		APIKey:      cmp.Or(over.APIKey, os.Getenv("BRIMBLE_API_KEY"), file.APIKey),
+		CoreBaseURL: strings.TrimRight(strings.TrimSpace(cmp.Or(over.CoreBaseURL, os.Getenv("BRIMBLE_CORE_BASE_URL"), defaultCoreBaseURL)), "/"),
+		AuthBaseURL: strings.TrimRight(strings.TrimSpace(cmp.Or(over.AuthBaseURL, os.Getenv("BRIMBLE_AUTH_BASE_URL"), defaultAuthBaseURL)), "/"),
+		Output:      cmp.Or(over.Output, defaultOutput),
 		Timeout:     defaultTimeout,
 		ConfigPath:  path,
+	}
+
+	switch {
+	case strings.TrimSpace(over.TeamID) != "":
+		cfg.TeamID, cfg.TeamSource = over.TeamID, "flag"
+	case strings.TrimSpace(os.Getenv("BRIMBLE_TEAM_ID")) != "":
+		cfg.TeamID, cfg.TeamSource = os.Getenv("BRIMBLE_TEAM_ID"), "env"
+	case strings.TrimSpace(over.LinkTeamID) != "":
+		cfg.TeamID, cfg.TeamSource = over.LinkTeamID, "link"
+	case file.TeamID != "":
+		cfg.TeamID, cfg.TeamSource, cfg.TeamName = file.TeamID, "config", file.TeamName
+	}
+	if cfg.TeamID == file.TeamID {
+		cfg.TeamName = file.TeamName
 	}
 
 	if over.Timeout > 0 {
@@ -85,8 +103,9 @@ func SaveCredentials(path, apiKey, teamID string) error {
 	if apiKey != "" {
 		existing.APIKey = strings.TrimSpace(apiKey)
 	}
-	if teamID != "" {
+	if teamID != "" && teamID != existing.TeamID {
 		existing.TeamID = strings.TrimSpace(teamID)
+		existing.TeamName = ""
 	}
 
 	return writeFile(path, existing)
@@ -106,7 +125,32 @@ func ClearCredentials(path string) error {
 		return err
 	}
 
+	// The default team belongs to the account being logged out.
 	existing.APIKey = ""
+	existing.TeamID = ""
+	existing.TeamName = ""
+	return writeFile(path, existing)
+}
+
+// SaveTeam sets the default team. An empty teamID switches back to the
+// personal workspace.
+func SaveTeam(path, teamID, teamName string) error {
+	if path == "" {
+		var err error
+		path, err = defaultConfigPath()
+		if err != nil {
+			return err
+		}
+	}
+	existing, err := readFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	existing.TeamID = strings.TrimSpace(teamID)
+	existing.TeamName = strings.TrimSpace(teamName)
+	if existing.TeamID == "" {
+		existing.TeamName = ""
+	}
 	return writeFile(path, existing)
 }
 
@@ -140,13 +184,4 @@ func writeFile(path string, fc FileConfig) error {
 	}
 	b = append(b, '\n')
 	return os.WriteFile(path, b, 0o600)
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, v := range values {
-		if strings.TrimSpace(v) != "" {
-			return strings.TrimSpace(v)
-		}
-	}
-	return ""
 }

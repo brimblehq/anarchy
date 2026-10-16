@@ -23,8 +23,8 @@ func NewAuth(baseURL string, timeout time.Duration, creds auth.Credentials, user
 	}
 }
 
-func (c *Auth) Me(ctx context.Context) (any, error) {
-	var data any
+func (c *Auth) Me(ctx context.Context) (User, error) {
+	var data User
 	_, err := c.http.DoJSON(ctx, Request{
 		Method: http.MethodGet,
 		Path:   "/user/me",

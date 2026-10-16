@@ -12,7 +12,7 @@ LDFLAGS := -s -w \
 # Prefer a local goreleaser binary; otherwise run via Go modules (no install needed).
 GORELEASER ?= $(shell command -v goreleaser 2>/dev/null)
 ifeq ($(GORELEASER),)
-GORELEASER := go run github.com/goreleaser/goreleaser/v2@v2.9.0
+GORELEASER := go run github.com/goreleaser/goreleaser/v2@v2.18.3
 endif
 
 build:

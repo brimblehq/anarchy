@@ -3,116 +3,114 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/brimbleapp/brimble-cli/internal/client"
 	"github.com/brimbleapp/brimble-cli/internal/ui"
 )
 
-func printProjectList(data any) error {
-	projects := projectOptions(data)
-	if len(projects) == 0 {
-		ui.Muted("(no projects)")
+func printProjectList(list client.ProjectList) error {
+	if len(list.Projects) == 0 {
+		ui.Muted("No projects%s yet — create one with `brimble deploy` or `brimble project create`", teamSuffix())
 		return nil
 	}
-	nameW := 4
-	for _, p := range projects {
-		if len(p.Name) > nameW {
-			nameW = len(p.Name)
+	rows := make([][]string, 0, len(list.Projects))
+	for _, p := range list.Projects {
+		if p.Name == "" {
+			continue
 		}
-	}
-	if nameW > 40 {
-		nameW = 40
-	}
-	fmt.Fprintf(os.Stdout, "  %-*s  %-10s\n", nameW, ui.Dim("NAME"), ui.Dim("STATUS"))
-	for _, p := range projects {
 		name := p.Name
-		if len(name) > nameW {
-			name = name[:nameW-1] + "…"
+		if linked != nil && linked.ProjectID == p.ProjectID() {
+			name += ui.Dim(" (linked)")
 		}
-		fmt.Fprintf(os.Stdout, "  %-*s  %s\n", nameW, name, p.Status)
+		rows = append(rows, []string{
+			name, p.ServiceType, ui.Status(p.Status), strings.TrimPrefix(p.Domain, "https://"), formatAgo(p.UpdatedAt),
+		})
+	}
+	fmt.Fprintln(os.Stdout)
+	ui.Table([]string{"NAME", "TYPE", "STATUS", "URL", "UPDATED"}, rows)
+
+	if list.TotalPages > 1 {
+		fmt.Fprintln(os.Stdout)
+		ui.Muted("  %d projects · page %d of %d · --page to see more", list.TotalProjects, max(1, list.CurrentPage), list.TotalPages)
 	}
 	fmt.Fprintln(os.Stdout)
 	return nil
 }
 
-func printProjectView(data any) error {
-	m, ok := data.(map[string]any)
-	if !ok {
-		return printResult(data)
+func printProjectView(p client.Project) error {
+	ui.Title(p.Name)
+
+	printKV("Status", ui.Status(p.Status))
+	printKV("URL", p.Domain)
+	if p.Team != nil {
+		printKV("Team", p.Team.Name)
+	}
+	if p.HasUpdates {
+		printKV("Pending", ui.Yellow("settings changed — run `brimble deploy` to apply"))
+	}
+	if p.Disabled {
+		printKV("Disabled", ui.Red("yes — the project is not serving traffic"))
+	}
+	if p.PasswordEnabled {
+		printKV("Password", "on")
+	}
+	if p.PreviewDeploymentsEnabled {
+		printKV("Previews", "on")
+	}
+	printKV("Type", joinNonEmpty(" · ", p.ServiceType, p.Framework))
+	printKV("Public", yesNo(p.Public))
+	printKV("Maintenance", yesNo(p.Maintenance))
+	printKV("Created", formatTime(p.CreatedAt))
+	printKV("Updated", formatTime(p.UpdatedAt))
+
+	if p.Repo != nil {
+		ui.Section("Repository")
+		printKV("Repo", p.Repo.Label())
+		printKV("Branch", p.Repo.Branch)
+		printKV("Link", p.GitLink)
+	} else if p.GitLink != "" {
+		ui.Section("Repository")
+		printKV("Link", p.GitLink)
 	}
 
-	name := firstString(m, "name")
-	status := firstString(m, "status")
-	ui.Title(formatProjectHeading(name, status))
-
-	printKV("Domain", firstString(m, "domain"))
-	printKV("Type", joinNonEmpty(" · ", firstString(m, "serviceType"), firstString(m, "framework", "frameworkType")))
-	printKV("Public", formatBool(m["public"]))
-	printKV("Maintenance", formatBool(m["maintenance"]))
-	printKV("Created", formatTime(firstString(m, "createdAt")))
-	printKV("Updated", formatTime(firstString(m, "updatedAt")))
-
-	if repo, ok := m["repo"].(map[string]any); ok && len(repo) > 0 {
-		ui.Section("Repository")
-		fullName := firstString(repo, "full_name", "fullName", "name")
-		branch := firstString(repo, "branch")
-		printKV("Repo", fullName)
-		printKV("Branch", branch)
-		if link := firstString(m, "gitLink"); link != "" {
-			printKV("Link", link)
-		}
-	} else if link := firstString(m, "gitLink"); link != "" {
-		ui.Section("Repository")
-		printKV("Link", link)
-	}
-
-	if specs, ok := m["specs"].(map[string]any); ok && len(specs) > 0 {
+	if p.Specs != nil {
 		ui.Section("Resources")
-		printKV("CPU", formatNum(specs["cpu"]))
-		printKV("Memory", formatMemory(specs["memory"]))
-		printKV("Region", formatRegion(specs["region"]))
-		if disk := formatNum(m["diskSize"]); disk != "" && disk != "0" {
+		printKV("CPU", formatFloat(p.Specs.CPU))
+		printKV("Memory", formatMemory(p.Specs.Memory))
+		printKV("Region", p.Specs.Region.Name)
+		if disk := formatFloat(p.DiskSize); disk != "" && disk != "0" {
 			printKV("Disk", disk)
 		}
 	}
 
 	ui.Section("Deploy")
-	printKV("Health", formatHealth(m["healthStatus"]))
-	if log, ok := m["log"].(map[string]any); ok && len(log) > 0 {
-		msg := firstString(log, "message", "status", "state")
-		if msg != "" {
-			printKV("Last log", truncate(msg, 80))
-		}
-		if at := firstString(log, "createdAt", "updatedAt", "finishedAt"); at != "" {
-			printKV("Last log at", formatTime(at))
-		}
+	printKV("Health", formatHealth(p.Health))
+	if p.Log != nil {
+		printKV("Last commit", truncate(firstLine(p.Log.Message), 80))
 	}
-	printKV("In cluster", formatBool(m["deployedInCluster"]))
-	printKV("Replica ready", formatBool(m["replica_ready"]))
+	printKV("In cluster", yesNo(p.DeployedInCluster))
+	printKV("Replica ready", yesNo(p.ReplicaReady))
 
-	install := firstString(m, "installCommand")
-	build := firstString(m, "buildCommand")
-	start := firstString(m, "startCommand")
-	root := firstString(m, "rootDirectory")
-	output := firstString(m, "outputDirectory")
-	if install != "" || build != "" || start != "" || root != "" || output != "" {
+	if p.InstallCommand != "" || p.BuildCommand != "" || p.StartCommand != "" || p.RootDirectory != "" || p.OutputDirectory != "" {
 		ui.Section("Build")
-		printKV("Install", install)
-		printKV("Build", build)
-		printKV("Start", start)
-		printKV("Root dir", root)
-		printKV("Output dir", output)
+		printKV("Install", p.InstallCommand)
+		printKV("Build", p.BuildCommand)
+		printKV("Start", p.StartCommand)
+		printKV("Root dir", p.RootDirectory)
+		printKV("Output dir", p.OutputDirectory)
 	}
 
-	if domains := domainNames(m["domains"]); len(domains) > 0 {
+	if names := namedNames(p.Domains); len(names) > 0 {
 		ui.Section("Domains")
-		for _, d := range domains {
+		for _, d := range names {
 			ui.Bullet(d)
 		}
 	}
 
-	if envNames := envVarNames(m["environments"]); len(envNames) > 0 {
+	if envNames := namedNames(p.Environments); len(envNames) > 0 {
 		ui.Section(fmt.Sprintf("Environment variables (%d)", len(envNames)))
 		shown := envNames
 		if len(shown) > 12 {
@@ -128,16 +126,6 @@ func printProjectView(data any) error {
 
 	fmt.Fprintln(os.Stdout)
 	return nil
-}
-
-func formatProjectHeading(name, status string) string {
-	if name == "" {
-		name = "project"
-	}
-	if status == "" {
-		return name
-	}
-	return name + "  ·  " + status
 }
 
 func printKV(key, value string) {
@@ -157,124 +145,56 @@ func joinNonEmpty(sep string, parts ...string) string {
 	return strings.Join(out, sep)
 }
 
-func formatBool(v any) string {
-	if v == nil {
-		return ""
-	}
-	b, ok := v.(bool)
-	if !ok {
-		return fmt.Sprint(v)
-	}
+func yesNo(b bool) string {
 	if b {
 		return "yes"
 	}
 	return "no"
 }
 
-func formatNum(v any) string {
-	if v == nil {
-		return ""
+func formatFloat(v float64) string {
+	if v == float64(int64(v)) {
+		return strconv.FormatInt(int64(v), 10)
 	}
-	switch t := v.(type) {
-	case float64:
-		if t == float64(int64(t)) {
-			return fmt.Sprintf("%d", int64(t))
-		}
-		return fmt.Sprintf("%g", t)
-	case string:
-		return t
-	default:
-		return fmt.Sprint(t)
-	}
+	return strconv.FormatFloat(v, 'g', -1, 64)
 }
 
-func formatMemory(v any) string {
-	s := formatNum(v)
+func formatMemory(v float64) string {
+	s := formatFloat(v)
 	if s == "" {
 		return ""
 	}
 	return s + " GB"
 }
 
-func formatRegion(v any) string {
-	if v == nil {
+func formatHealth(h client.HealthStatus) string {
+	if h.Status == "" {
 		return ""
 	}
-	if s, ok := v.(string); ok {
-		return s
+	if h.StatusCode != 0 {
+		return h.Status + " (" + strconv.Itoa(h.StatusCode) + ")"
 	}
-	m, ok := v.(map[string]any)
-	if !ok {
-		return fmt.Sprint(v)
-	}
-	return firstString(m, "name", "slug", "code", "region")
-}
-
-func formatHealth(v any) string {
-	if v == nil {
-		return ""
-	}
-	if s, ok := v.(string); ok {
-		return s
-	}
-	m, ok := v.(map[string]any)
-	if !ok {
-		return fmt.Sprint(v)
-	}
-	status := firstString(m, "status")
-	code := formatNum(m["statusCode"])
-	if status == "" {
-		return ""
-	}
-	if code != "" {
-		return status + " (" + code + ")"
-	}
-	return status
+	return h.Status
 }
 
 func formatTime(raw string) string {
 	if raw == "" {
 		return ""
 	}
-	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
-		if t, err := time.Parse(layout, raw); err == nil {
-			return t.UTC().Format("2006-01-02 15:04 UTC")
-		}
+	if t, err := time.Parse(time.RFC3339Nano, raw); err == nil {
+		return t.UTC().Format("2006-01-02 15:04 UTC")
+	}
+	if t, err := time.Parse(time.RFC3339, raw); err == nil {
+		return t.UTC().Format("2006-01-02 15:04 UTC")
 	}
 	return raw
 }
 
-func domainNames(v any) []string {
-	items, ok := v.([]any)
-	if !ok {
-		return nil
-	}
+func namedNames(items []client.Named) []string {
 	var names []string
 	for _, item := range items {
-		m, ok := item.(map[string]any)
-		if !ok {
-			continue
-		}
-		if n := firstString(m, "name", "domain", "host"); n != "" {
-			names = append(names, n)
-		}
-	}
-	return names
-}
-
-func envVarNames(v any) []string {
-	items, ok := v.([]any)
-	if !ok {
-		return nil
-	}
-	var names []string
-	for _, item := range items {
-		m, ok := item.(map[string]any)
-		if !ok {
-			continue
-		}
-		if n := firstString(m, "name", "key"); n != "" {
-			names = append(names, n)
+		if item.Name != "" {
+			names = append(names, item.Name)
 		}
 	}
 	return names
@@ -285,4 +205,49 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n-1] + "…"
+}
+
+func parseTime(raw string) (time.Time, bool) {
+	if raw == "" {
+		return time.Time{}, false
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+		if t, err := time.Parse(layout, raw); err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
+}
+
+func formatAgo(raw string) string {
+	t, ok := parseTime(raw)
+	if !ok {
+		return raw
+	}
+	d := time.Since(t)
+	switch {
+	case d < 0:
+		return t.Local().Format("Jan 2 15:04")
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	case d < 30*24*time.Hour:
+		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
+	}
+	return t.Local().Format("Jan 2, 2006")
+}
+
+func formatClock(raw string) string {
+	t, ok := parseTime(raw)
+	if !ok {
+		return raw
+	}
+	t = t.Local()
+	if y, m, d := t.Date(); y == time.Now().Year() && m == time.Now().Month() && d == time.Now().Day() {
+		return t.Format("15:04:05")
+	}
+	return t.Format("Jan 2 15:04:05")
 }

@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"reflect"
 	"strings"
 	"text/tabwriter"
@@ -19,20 +18,17 @@ var (
 )
 
 func Print(w io.Writer, format string, data any) error {
-	if w == nil {
-		w = os.Stdout
+	if raw, ok := data.(json.RawMessage); ok && len(raw) > 0 {
+		var v any
+		if err := json.Unmarshal(raw, &v); err != nil {
+			return err
+		}
+		data = v
 	}
 	if format == "json" {
 		return printJSON(w, data)
 	}
 	return printTable(w, data)
-}
-
-func PrintJSON(w io.Writer, data any) error {
-	if w == nil {
-		w = os.Stdout
-	}
-	return printJSON(w, data)
 }
 
 func printJSON(w io.Writer, data any) error {
@@ -95,8 +91,7 @@ func printSlice(w io.Writer, items []any) error {
 	for _, m := range maps {
 		cells := make([]string, len(cols))
 		for i, col := range cols {
-			v, _ := lookup(m, col)
-			cells[i] = formatCell(v)
+			cells[i] = formatCell(m[col])
 		}
 		fmt.Fprintln(tw, strings.Join(cells, "\t"))
 	}
@@ -113,7 +108,7 @@ func preferredColumns(maps []map[string]any) []string {
 
 	for _, p := range preferred {
 		for _, m := range maps {
-			if _, ok := lookup(m, p); ok {
+			if _, ok := m[p]; ok {
 				if !seen[p] {
 					seen[p] = true
 					cols = append(cols, p)
@@ -137,13 +132,6 @@ func preferredColumns(maps []map[string]any) []string {
 		}
 	}
 	return cols
-}
-
-func lookup(m map[string]any, key string) (any, bool) {
-	if v, ok := m[key]; ok {
-		return v, true
-	}
-	return nil, false
 }
 
 func formatCell(v any) string {

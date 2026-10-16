@@ -6,6 +6,7 @@ project_name: brimble
 before:
   hooks:
     - go mod tidy
+    - sh scripts/completions.sh
 
 builds:
   - id: brimble
@@ -40,9 +41,41 @@ archives:
         formats: [zip]
     files:
       - README.md
+      - completions/*
 
 checksum:
   name_template: checksums.txt
+
+# Homebrew cask in the tap repo: brew install brimbleapp/tap/brimble
+# Publishing needs HOMEBREW_TAP_GITHUB_TOKEN with write access to the tap;
+# without it the cask is generated but not pushed.
+homebrew_casks:
+  - name: brimble
+    binaries: [brimble]
+    description: Deploy and manage apps on Brimble from your terminal
+    homepage: https://brimble.io
+    repository:
+      owner: '{{ envOrDefault "HOMEBREW_TAP_OWNER" "brimbleapp" }}'
+      name: '{{ envOrDefault "HOMEBREW_TAP_REPO" "homebrew-tap" }}'
+      token: '{{ envOrDefault "HOMEBREW_TAP_GITHUB_TOKEN" "" }}'
+    # Skip the tap push (but still build the cask) until the token is set.
+    skip_upload: '{{ if eq (envOrDefault "HOMEBREW_TAP_GITHUB_TOKEN" "") "" }}true{{ end }}'
+    directory: Casks
+    commit_author:
+      name: brimble-bot
+      email: bot@brimble.io
+    commit_msg_template: "brimble {{ .Tag }}"
+    completions:
+      bash: completions/brimble.bash
+      zsh: completions/brimble.zsh
+      fish: completions/brimble.fish
+    # The binary isn't notarized; drop the quarantine flag so macOS runs it.
+    hooks:
+      post:
+        install: |
+          if OS.mac? && system_command("/usr/bin/xattr", args: ["-h"]).exit_status == 0
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/brimble"]
+          end
 
 changelog:
   sort: asc
@@ -54,23 +87,26 @@ changelog:
       - "^chore:"
 
 release:
+  github:
+    owner: brimbleapp
+    name: brimble-cli
+  extra_files:
+    - glob: scripts/install.sh
   footer: >-
 
     ---
 
     ## Install
 
-    Download the archive for your OS/arch from the assets above, extract it, and put `brimble` on your `PATH`.
-
     ```bash
-    # macOS / Linux example
-    tar -xzf brimble_*.tar.gz
-    sudo mv brimble /usr/local/bin/
-    brimble --version
-    ```
+    # Homebrew (macOS, Linux)
+    brew install brimbleapp/tap/brimble
 
-    Or install from source:
+    # Install script (macOS, Linux)
+    curl -fsSL {{ envOrDefault "INSTALL_SCRIPT_URL" (printf "https://github.com/brimbleapp/brimble-cli/releases/download/%s/install.sh" .Tag) }} | sh
 
-    ```bash
+    # From source
     go install github.com/brimbleapp/brimble-cli/cmd/brimble@{{ .Tag }}
     ```
+
+    On Windows, download the zip for your architecture from the assets above.

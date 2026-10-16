@@ -1,8 +1,12 @@
 package cmd
 
 import (
+	"cmp"
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/url"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -34,98 +38,194 @@ type createDraft struct {
 	CronExpression  string
 	CronTimezone    string
 	AuthEnabled     bool
-	EnvVars         []map[string]string
+	EnvVars         []client.EnvVar
 	Deploy          bool
 	TeamID          string
+	// UploadDir is set for the "upload a folder" source (static drop project).
+	UploadDir string
 }
 
-func runCreateQuestionnaire(ctx context.Context, teamID string) (map[string]any, error) {
+const sourceUpload = "upload"
+
+type createOptions struct {
+	offerLink bool
+	detach    bool
+	noLogs    bool
+}
+
+// runCreate creates a project from body (a Core JSON payload) or, when body
+// is nil, from the interactive questionnaire, then follows the first deploy.
+func runCreate(ctx context.Context, body json.RawMessage, opts createOptions) error {
+	var draft *createDraft
+	if len(body) == 0 {
+		d, err := runCreateQuestionnaire(ctx, cfg.TeamID)
+		if err != nil {
+			return err
+		}
+		draft = d
+	}
+
+	var ref ProjectRef
+	var logID string
+	if draft != nil && draft.Source == sourceUpload {
+		var err error
+		logID, err = uploadDrop(ctx, client.DropOpts{Name: draft.Name, TeamID: cfg.TeamID}, draft.UploadDir, draft.Name)
+		if err != nil {
+			return err
+		}
+		ref, err = fetchProject(ctx, draft.Name)
+		if err != nil {
+			return err
+		}
+	} else {
+		payload := body
+		if draft != nil {
+			var err error
+			payload, err = json.Marshal(draft.toPayload())
+			if err != nil {
+				return err
+			}
+		}
+		var created client.CreateResult
+		err := ui.WithSpinner("Creating project…", func() error {
+			var err error
+			created, err = coreClient.CreateProject(ctx, payload, cfg.TeamID)
+			return err
+		})
+		if err != nil {
+			return err
+		}
+		if jsonOutput() {
+			return printResult(created)
+		}
+		ref = ProjectRef{ID: created.ID, Name: created.Name, Project: created.Project}
+		if ref.Name == "" && draft != nil {
+			ref.Name = draft.Name
+		}
+		if ref.Name == "" {
+			var named struct {
+				Name string `json:"name"`
+			}
+			_ = json.Unmarshal(body, &named)
+			ref.Name = named.Name
+		}
+		logID = created.LogID
+	}
+
+	ui.Success("Created %s", ref.Display())
+	if opts.offerLink || draft != nil {
+		offerLink(ref)
+	}
+	if logID == "" {
+		ui.Hint("Deploy it with `brimble deploy %s`", ref.Name)
+		return nil
+	}
+	return afterDeployStarted(ctx, ref, logID, opts.detach, !opts.noLogs)
+}
+
+func runCreateQuestionnaire(ctx context.Context, teamID string) (*createDraft, error) {
 	if !ui.IsInteractive() {
 		return nil, fmt.Errorf("not a terminal; pass --file with a JSON body")
 	}
 
 	ui.Title("Create project")
 
-	name, err := ui.Text("Project name", "my-app", "")
+	defaultName := ""
+	if wd, err := os.Getwd(); err == nil {
+		defaultName = slugifyName(lastPathPart(wd))
+	}
+	name, err := ui.Text("Project name", cmp.Or(defaultName, "my-app"), defaultName)
 	if err != nil {
 		return nil, err
 	}
 	name = slugifyName(name)
 	if len(name) < 3 {
-		return nil, fmt.Errorf("project name must be at least 3 characters")
+		return nil, fmt.Errorf("project name must be at least 3 characters (letters, numbers, dashes)")
 	}
 
-	source, err := ui.Select("Source", []ui.Option{
+	source, err := ui.Select("Deploy from", []ui.Option{
+		{Label: "GitHub repository", Value: "github"},
+		{Label: "GitLab repository", Value: "gitlab"},
+		{Label: "Bitbucket repository", Value: "bitbucket"},
 		{Label: "Docker image", Value: "docker"},
-		{Label: "GitHub", Value: "github"},
-		{Label: "GitLab", Value: "gitlab"},
-		{Label: "Bitbucket", Value: "bitbucket"},
+		{Label: "Upload a local folder (static site)", Value: sourceUpload},
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	serviceType, err := ui.Select("Service type", []ui.Option{
-		{Label: "Web Service — APIs and dynamic apps", Value: "web-service"},
-		{Label: "Static Site — HTML/CSS/JS, no server", Value: "static"},
-		{Label: "Worker — background jobs / cron", Value: "worker"},
-		{Label: "MCP — AI tool servers", Value: "mcp"},
-	})
-	if err != nil {
-		return nil, err
+	draft := &createDraft{
+		Name:   name,
+		Source: source,
+		CPU:    0.5,
+		Memory: 0.5,
+		Deploy: true,
+		TeamID: teamID,
 	}
 
-	draft := createDraft{
-		Name:        name,
-		Source:      source,
-		ServiceType: serviceType,
-		CPU:         0.5,
-		Memory:      0.5,
-		Deploy:      true,
-		TeamID:      teamID,
-	}
-
-	if source == "docker" {
-		if err := fillDockerDraft(&draft); err != nil {
-			return nil, err
-		}
-	} else {
-		if err := fillGitDraft(ctx, &draft); err != nil {
-			return nil, err
-		}
-	}
-
-	if err := fillSharedDraft(ctx, &draft); err != nil {
-		return nil, err
-	}
-
-	if serviceType == "worker" {
-		if err := fillWorkerDraft(&draft); err != nil {
-			return nil, err
-		}
-	}
-	if serviceType == "mcp" {
-		auth, err := ui.Confirm("Enable MCP auth?", false)
+	if source == sourceUpload {
+		draft.ServiceType = "static"
+		draft.UploadDir, err = ui.Text("Folder to upload", ".", ".")
 		if err != nil {
 			return nil, err
 		}
-		draft.AuthEnabled = auth
+		if st, err := os.Stat(draft.UploadDir); err != nil || !st.IsDir() {
+			return nil, fmt.Errorf("%s is not a folder", draft.UploadDir)
+		}
+		return draft, nil
 	}
 
-	if err := fillEnvVars(&draft); err != nil {
-		return nil, err
+	serviceOpts := []ui.Option{
+		{Label: "Web service — APIs and server-rendered apps", Value: "web-service"},
+		{Label: "Static site — HTML/CSS/JS, no server", Value: "static"},
+		{Label: "Worker — background jobs or cron, no public URL", Value: "worker"},
+		{Label: "MCP server — tools for AI agents", Value: "mcp"},
 	}
-
-	deploy, err := ui.Confirm("Deploy immediately after create?", true)
+	if source == "docker" {
+		serviceOpts = append(serviceOpts[:1], serviceOpts[2:]...)
+	}
+	draft.ServiceType, err = ui.Select("Service type", serviceOpts)
 	if err != nil {
 		return nil, err
 	}
-	draft.Deploy = deploy
 
-	return draft.toPayload(), nil
+	if source == "docker" {
+		err = fillDockerDraft(ctx, draft)
+	} else {
+		err = fillGitDraft(ctx, draft)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if err := fillSharedDraft(ctx, draft); err != nil {
+		return nil, err
+	}
+
+	if draft.ServiceType == "worker" {
+		if err := fillWorkerDraft(draft); err != nil {
+			return nil, err
+		}
+	}
+	if draft.ServiceType == "mcp" {
+		draft.AuthEnabled, err = ui.Confirm("Require a Brimble API key to call this MCP server?", false)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if err := fillEnvVars(draft); err != nil {
+		return nil, err
+	}
+
+	draft.Deploy, err = ui.Confirm("Deploy now?", true)
+	if err != nil {
+		return nil, err
+	}
+	return draft, nil
 }
 
-func fillDockerDraft(d *createDraft) error {
+func fillDockerDraft(ctx context.Context, d *createDraft) error {
 	d.Framework = "docker"
 	image, err := ui.Text("Docker image", "nginx:latest", "")
 	if err != nil {
@@ -142,22 +242,43 @@ func fillDockerDraft(d *createDraft) error {
 	d.RepoName = image
 	d.RepoBranch = tag
 
-	needCreds, err := ui.Confirm("Private registry credentials?", false)
+	private, err := ui.Confirm("Is the image in a private registry?", false)
 	if err != nil {
 		return err
 	}
-	if needCreds {
+	if private {
 		d.RegistryUser, err = ui.Text("Registry username", "", "")
 		if err != nil {
 			return err
 		}
-		d.RegistryToken, err = ui.Password("Registry token / password", "")
+		d.RegistryToken, err = ui.Password("Registry token or password", "")
 		if err != nil {
 			return err
 		}
 	}
 
-	d.PreStartCommand, err = ui.Text("Pre-start command (optional)", "", "")
+	var valid bool
+	err = ui.WithSpinner("Checking image…", func() error {
+		var err error
+		valid, err = coreClient.ValidateImage(ctx, image, d.RegistryUser, d.RegistryToken, d.TeamID)
+		return err
+	})
+	if err != nil || !valid {
+		reason := "the image could not be found or pulled"
+		if err != nil {
+			reason = err.Error()
+		}
+		ui.Warn("Could not verify %s: %s", image, reason)
+		ok, err := ui.Confirm("Continue anyway?", false)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return errAborted
+		}
+	}
+
+	d.PreStartCommand, err = ui.Text("Pre-start command, e.g. migrations (optional)", "", "")
 	return err
 }
 
@@ -167,7 +288,7 @@ func fillGitDraft(ctx context.Context, d *createDraft) error {
 		return err
 	}
 	if len(accounts) == 0 {
-		return fmt.Errorf("%s is not connected — link it in the Brimble dashboard under account settings, then try again", d.Source)
+		return fmt.Errorf("%s is not connected to Brimble — connect it at https://app.brimble.io, then try again", gitLabel(d.Source))
 	}
 
 	account, err := pickGitAccount(accounts)
@@ -176,12 +297,16 @@ func fillGitDraft(ctx context.Context, d *createDraft) error {
 	}
 	d.InstallationID = account.InstallationID
 
-	repos, err := loadGitRepos(ctx, d.Source, d.InstallationID, d.TeamID)
+	search, err := ui.Text("Search repositories (leave empty to list recent)", "", "")
+	if err != nil {
+		return err
+	}
+	repos, err := loadGitRepos(ctx, d.Source, d.InstallationID, strings.TrimSpace(search), d.TeamID)
 	if err != nil {
 		return err
 	}
 	if len(repos) == 0 {
-		return fmt.Errorf("no repositories found for this %s account", d.Source)
+		return fmt.Errorf("no repositories found for this %s account", gitLabel(d.Source))
 	}
 
 	repo, err := pickGitRepo(repos)
@@ -189,15 +314,12 @@ func fillGitDraft(ctx context.Context, d *createDraft) error {
 		return err
 	}
 	d.RepoName = repo.FullName
-	d.RepoBranch = repo.Branch
-	if d.RepoBranch == "" {
-		d.RepoBranch = "main"
-	}
+	d.RepoBranch = cmp.Or(repo.Branch, "main")
 	if repo.InstallationID > 0 {
 		d.InstallationID = repo.InstallationID
 	}
 
-	branch, err := ui.Text("Branch", d.RepoBranch, d.RepoBranch)
+	branch, err := ui.Text("Production branch", d.RepoBranch, d.RepoBranch)
 	if err != nil {
 		return err
 	}
@@ -205,80 +327,72 @@ func fillGitDraft(ctx context.Context, d *createDraft) error {
 		d.RepoBranch = strings.TrimSpace(branch)
 	}
 
-	if repo.Framework != "" {
-		d.Framework = repo.Framework
-	}
-
-	frameworks, err := loadFrameworkSlugs(ctx)
-	if err != nil || len(frameworks) == 0 {
-		frameworks = []string{"nodejs", "next", "docker", "html", "static", "python", "golang"}
-	}
-	fwOpts := make([]ui.Option, 0, len(frameworks)+1)
-	if d.Framework != "" {
-		fwOpts = append(fwOpts, ui.Option{Label: d.Framework + " (detected)", Value: d.Framework})
-	}
-	seen := map[string]bool{d.Framework: true}
-	for _, s := range frameworks {
-		if seen[s] {
-			continue
-		}
-		seen[s] = true
-		fwOpts = append(fwOpts, ui.Option{Label: s, Value: s})
-	}
-	d.Framework, err = ui.Select("Framework", fwOpts)
+	frameworks, err := loadFrameworks(ctx)
 	if err != nil {
 		return err
 	}
+	detected := ""
+	if repo.Framework != nil {
+		detected = repo.Framework.Slug
+	}
+	fw, err := pickFramework(frameworks, detected)
+	if err != nil {
+		return err
+	}
+	d.Framework = fw.Slug
 
 	if isNoBuildFramework(d.Framework) {
 		return nil
 	}
 
-	d.RootDirectory, err = ui.Text("Root directory", ".", "")
+	install, build, start, output := fw.InstallCommand, fw.BuildCommand, fw.StartCommand, fw.OutputDirectory
+	if repo.Framework != nil {
+		install = cmp.Or(repo.Framework.InstallCommand, install)
+		build = cmp.Or(repo.Framework.BuildCommand, build)
+		start = cmp.Or(repo.Framework.StartCommand, start)
+		output = cmp.Or(repo.Framework.OutputDirectory, output)
+	}
+
+	d.RootDirectory, err = ui.Text("Root directory (for monorepos)", ".", "")
 	if err != nil {
 		return err
 	}
 	if d.RootDirectory == "." || d.RootDirectory == "./" {
 		d.RootDirectory = ""
 	}
+	if d.Framework == "docker" {
+		return nil
+	}
 
-	d.InstallCommand, err = ui.Text("Install command", firstNonEmptyStr(repo.InstallCommand, "npm install"), firstNonEmptyStr(repo.InstallCommand, "npm install"))
-	if err != nil {
+	if d.InstallCommand, err = ui.Text("Install command", install, install); err != nil {
 		return err
 	}
-	d.BuildCommand, err = ui.Text("Build command", firstNonEmptyStr(repo.BuildCommand, "npm run build"), firstNonEmptyStr(repo.BuildCommand, "npm run build"))
-	if err != nil {
+	if d.BuildCommand, err = ui.Text("Build command", build, build); err != nil {
 		return err
 	}
-	if d.ServiceType != "static" {
-		d.StartCommand, err = ui.Text("Start command", firstNonEmptyStr(repo.StartCommand, "npm start"), firstNonEmptyStr(repo.StartCommand, "npm start"))
-		if err != nil {
-			return err
-		}
+	if d.ServiceType == "static" {
+		d.OutputDirectory, err = ui.Text("Output directory", cmp.Or(output, "dist"), cmp.Or(output, "dist"))
+		return err
 	}
-	d.OutputDirectory, err = ui.Text("Output directory (optional)", repo.OutputDirectory, repo.OutputDirectory)
+	d.StartCommand, err = ui.Text("Start command", start, start)
 	return err
 }
 
-type gitAccount struct {
-	Label          string
-	InstallationID int
+func gitLabel(source string) string {
+	switch source {
+	case "github":
+		return "GitHub"
+	case "gitlab":
+		return "GitLab"
+	case "bitbucket":
+		return "Bitbucket"
+	}
+	return source
 }
 
-type gitRepo struct {
-	FullName        string
-	Branch          string
-	InstallationID  int
-	Framework       string
-	InstallCommand  string
-	BuildCommand    string
-	StartCommand    string
-	OutputDirectory string
-}
-
-func loadGitAccounts(ctx context.Context, source, teamID string) ([]gitAccount, error) {
-	var data any
-	err := ui.WithSpinner("Loading "+source+" accounts…", func() error {
+func loadGitAccounts(ctx context.Context, source, teamID string) ([]client.GitAccount, error) {
+	var data client.GitAccounts
+	err := ui.WithSpinner("Loading "+gitLabel(source)+" accounts…", func() error {
 		var err error
 		data, err = coreClient.ListGitAccounts(ctx, source, teamID)
 		return err
@@ -286,69 +400,52 @@ func loadGitAccounts(ctx context.Context, source, teamID string) ([]gitAccount, 
 	if err != nil {
 		return nil, err
 	}
-
-	// Shape: { accounts: [...], authenticated: bool } or bare list
-	var items []any
-	if m, ok := data.(map[string]any); ok {
-		if auth, ok := m["authenticated"].(bool); ok && !auth {
-			return nil, nil
-		}
-		items = asSlice(m["accounts"])
-		if items == nil {
-			items = asSlice(unwrapList(data))
-		}
-	} else {
-		items = asSlice(unwrapList(data))
+	if !data.Authenticated && len(data.Accounts) == 0 {
+		return nil, nil
 	}
-
-	out := make([]gitAccount, 0, len(items))
-	for _, item := range items {
-		m, ok := item.(map[string]any)
-		if !ok {
-			continue
+	out := make([]client.GitAccount, 0, len(data.Accounts))
+	for _, a := range data.Accounts {
+		if a.Username != "" || a.Name != "" {
+			out = append(out, a)
 		}
-		label := firstString(m, "name", "username", "login")
-		id := parseInstallationID(m)
-		if label == "" && id == 0 {
-			continue
-		}
-		if label == "" {
-			label = fmt.Sprintf("account %d", id)
-		}
-		out = append(out, gitAccount{Label: label, InstallationID: id})
 	}
 	return out, nil
 }
 
-func pickGitAccount(accounts []gitAccount) (gitAccount, error) {
+func pickGitAccount(accounts []client.GitAccount) (client.GitAccount, error) {
 	if len(accounts) == 1 {
 		return accounts[0], nil
 	}
 	opts := make([]ui.Option, 0, len(accounts))
-	byLabel := map[string]gitAccount{}
+	byKey := map[string]client.GitAccount{}
 	for _, a := range accounts {
-		opts = append(opts, ui.Option{Label: a.Label, Value: a.Label})
-		byLabel[a.Label] = a
+		label := a.Username
+		if label == "" {
+			label = a.Name
+		} else if a.Name != "" && a.Name != a.Username {
+			label = a.Name + " (@" + a.Username + ")"
+		}
+		opts = append(opts, ui.Option{Label: label, Value: label})
+		byKey[label] = a
 	}
 	picked, err := ui.Select("Git account / org", opts)
 	if err != nil {
-		return gitAccount{}, err
+		return client.GitAccount{}, err
 	}
-	return byLabel[picked], nil
+	return byKey[picked], nil
 }
 
-func loadGitRepos(ctx context.Context, source string, installationID int, teamID string) ([]gitRepo, error) {
-	q := client.InstallationQuery(installationID)
-	// GitLab / Bitbucket query keys used by Core in some paths
-	if source == "gitlab" && installationID > 0 {
-		q.Set("groupId", strconv.Itoa(installationID))
-	}
-	if source == "bitbucket" && installationID > 0 {
-		q.Set("workspaceId", strconv.Itoa(installationID))
-	}
+func loadGitRepos(ctx context.Context, source string, installationID int, search, teamID string) ([]client.GitRepo, error) {
+	q := url.Values{}
 	q.Set("limit", "50")
+	if installationID > 0 {
+		q.Set("installationId", strconv.Itoa(installationID))
+	}
+	if search != "" {
+		q.Set("q", search)
+	}
 
-	var data any
+	var data client.RepoList
 	err := ui.WithSpinner("Loading repositories…", func() error {
 		var err error
 		data, err = coreClient.ListRepos(ctx, source, q, teamID)
@@ -357,102 +454,55 @@ func loadGitRepos(ctx context.Context, source string, installationID int, teamID
 	if err != nil {
 		return nil, err
 	}
-
-	items := asSlice(unwrapList(data))
-	if m, ok := data.(map[string]any); ok {
-		if repos := asSlice(m["repositories"]); len(repos) > 0 {
-			items = repos
+	out := make([]client.GitRepo, 0, len(data.Repositories))
+	for _, r := range data.Repositories {
+		if r.FullName != "" {
+			out = append(out, r)
 		}
-	}
-
-	out := make([]gitRepo, 0, len(items))
-	for _, item := range items {
-		m, ok := item.(map[string]any)
-		if !ok {
-			continue
-		}
-		fullName := firstString(m, "full_name", "fullName", "path_with_namespace", "name")
-		if fullName == "" {
-			continue
-		}
-		r := gitRepo{
-			FullName:       fullName,
-			Branch:         firstString(m, "branch", "default_branch", "defaultBranch"),
-			InstallationID: parseInstallationID(m),
-		}
-		if fw, ok := m["framework"].(map[string]any); ok {
-			r.Framework = firstString(fw, "slug", "name")
-			r.InstallCommand = firstString(fw, "installCommand")
-			r.BuildCommand = firstString(fw, "buildCommand")
-			r.StartCommand = firstString(fw, "startCommand")
-			r.OutputDirectory = firstString(fw, "outputDirectory")
-		} else if s := firstString(m, "framework"); s != "" {
-			r.Framework = s
-		}
-		out = append(out, r)
 	}
 	return out, nil
 }
 
-func pickGitRepo(repos []gitRepo) (gitRepo, error) {
+func pickGitRepo(repos []client.GitRepo) (client.GitRepo, error) {
 	opts := make([]ui.Option, 0, len(repos))
-	byName := map[string]gitRepo{}
+	byName := map[string]client.GitRepo{}
 	for _, r := range repos {
 		opts = append(opts, ui.Option{Label: r.FullName, Value: r.FullName})
 		byName[r.FullName] = r
 	}
 	picked, err := ui.Select("Repository", opts)
 	if err != nil {
-		return gitRepo{}, err
+		return client.GitRepo{}, err
 	}
 	return byName[picked], nil
 }
 
-func parseInstallationID(m map[string]any) int {
-	for _, key := range []string{"installationId", "installation_id", "groupId", "workspaceId", "id"} {
-		v, ok := m[key]
-		if !ok || v == nil {
-			continue
-		}
-		switch t := v.(type) {
-		case float64:
-			if t > 0 {
-				return int(t)
-			}
-		case string:
-			if n, err := strconv.Atoi(t); err == nil && n > 0 {
-				return n
-			}
-		case int:
-			if t > 0 {
-				return t
-			}
-		}
-	}
-	return 0
-}
-
-func firstNonEmptyStr(values ...string) string {
-	for _, v := range values {
-		if strings.TrimSpace(v) != "" {
-			return strings.TrimSpace(v)
-		}
-	}
-	return ""
-}
-
 func fillSharedDraft(ctx context.Context, d *createDraft) error {
-	regions, err := loadRegionOptions(ctx)
-	if err != nil || len(regions) == 0 {
-		d.RegionID, err = ui.Text("Region id", "", "")
-		return err
-	}
-	d.RegionID, err = ui.Select("Region", regions)
+	regions, defaultRegion, err := loadRegionOptions(ctx)
 	if err != nil {
 		return err
 	}
+	switch {
+	case len(regions) == 0 && d.ServiceType == "static":
+		// Region is optional for static sites.
+	case len(regions) == 0:
+		return fmt.Errorf("no regions are available for your plan")
+	default:
+		// Put the plan's default region first so Enter picks it.
+		for i, r := range regions {
+			if r.Value == defaultRegion && i > 0 {
+				regions[0], regions[i] = regions[i], regions[0]
+			}
+		}
+		if d.RegionID, err = ui.Select("Region", regions); err != nil {
+			return err
+		}
+	}
 
-	cpuStr, err := ui.Text("CPU cores", "0.5", "0.5")
+	if d.ServiceType == "static" {
+		return nil
+	}
+	cpuStr, err := ui.Text("CPU (vCPUs)", "0.5", "0.5")
 	if err != nil {
 		return err
 	}
@@ -460,13 +510,21 @@ func fillSharedDraft(ctx context.Context, d *createDraft) error {
 	if err != nil {
 		return err
 	}
-	if v, e := strconv.ParseFloat(strings.TrimSpace(cpuStr), 64); e == nil && v > 0 {
-		d.CPU = v
+	if d.CPU, err = parsePositive(cpuStr, "CPU"); err != nil {
+		return err
 	}
-	if v, e := strconv.ParseFloat(strings.TrimSpace(memStr), 64); e == nil && v > 0 {
-		d.Memory = v
+	if d.Memory, err = parsePositive(memStr, "memory"); err != nil {
+		return err
 	}
 	return nil
+}
+
+func parsePositive(s, label string) (float64, error) {
+	v, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
+	if err != nil || v <= 0 {
+		return 0, fmt.Errorf("%s must be a positive number, got %q", label, s)
+	}
+	return v, nil
 }
 
 func fillWorkerDraft(d *createDraft) error {
@@ -482,12 +540,22 @@ func fillWorkerDraft(d *createDraft) error {
 	if err != nil {
 		return err
 	}
-	d.CronTimezone, err = ui.Text("Timezone", "UTC", "UTC")
+	d.CronTimezone, err = ui.Text("Timezone (IANA)", "UTC", "UTC")
 	return err
 }
 
 func fillEnvVars(d *createDraft) error {
-	add, err := ui.Confirm("Add environment variables?", false)
+	if vars, err := readDotenv(".env"); err == nil && len(vars) > 0 {
+		use, err := ui.Confirm(fmt.Sprintf("Add the %d variables from ./.env?", len(vars)), true)
+		if err != nil {
+			return err
+		}
+		if use {
+			d.EnvVars = append(d.EnvVars, vars...)
+		}
+	}
+
+	add, err := ui.Confirm("Add environment variables manually?", false)
 	if err != nil {
 		return err
 	}
@@ -504,7 +572,7 @@ func fillEnvVars(d *createDraft) error {
 		if err != nil {
 			return err
 		}
-		d.EnvVars = append(d.EnvVars, map[string]string{"name": key, "value": val})
+		d.EnvVars = append(d.EnvVars, client.EnvVar{Name: key, Value: val})
 		add, err = ui.Confirm("Add another variable?", false)
 		if err != nil {
 			return err
@@ -513,74 +581,58 @@ func fillEnvVars(d *createDraft) error {
 	return nil
 }
 
-func (d createDraft) toPayload() map[string]any {
+func (d createDraft) toPayload() client.CreateProjectRequest {
 	git := strings.ToUpper(d.Source)
-	if d.Source == "docker" {
-		git = "DOCKER"
+	envs := d.EnvVars
+	if envs == nil {
+		envs = []client.EnvVar{}
 	}
-
-	body := map[string]any{
-		"name":        d.Name,
-		"git":         git,
-		"type":        "import",
-		"serviceType": d.ServiceType,
-		"framework":   d.Framework,
-		"repo": map[string]any{
-			"name":   d.RepoName,
-			"branch": d.RepoBranch,
-			"git":    git,
+	req := client.CreateProjectRequest{
+		Name:        d.Name,
+		Git:         git,
+		Type:        "import",
+		ServiceType: d.ServiceType,
+		Framework:   d.Framework,
+		Repo: client.CreateRepo{
+			Name:           d.RepoName,
+			Branch:         d.RepoBranch,
+			Git:            git,
+			InstallationID: d.InstallationID,
 		},
-		"configurations": map[string]any{
-			"region":  d.RegionID,
-			"cpu":     d.CPU,
-			"memory":  d.Memory,
-			"storage": 3,
+		Configurations: client.CreateConfigurations{
+			CPU:     d.CPU,
+			Memory:  d.Memory,
+			Storage: 3,
+			Region:  d.RegionID,
 		},
-		"environments": d.EnvVars,
-		"deploy":       d.Deploy,
-		"authEnabled":  d.AuthEnabled,
+		Environments:    envs,
+		Deploy:          d.Deploy,
+		TeamID:          d.TeamID,
+		InstallationID:  d.InstallationID,
+		InstallCommand:  d.InstallCommand,
+		BuildCommand:    d.BuildCommand,
+		StartCommand:    d.StartCommand,
+		OutputDirectory: d.OutputDirectory,
+		RootDirectory:   d.RootDirectory,
+		PreStartCommand: d.PreStartCommand,
+		CronEnabled:     d.CronEnabled,
+		CronExpression:  d.CronExpression,
+		CronTimezone:    d.CronTimezone,
 	}
-
-	if d.TeamID != "" {
-		body["teamId"] = d.TeamID
-	}
-	if d.InstallationID > 0 {
-		body["installationId"] = d.InstallationID
-	}
-	if d.InstallCommand != "" {
-		body["installCommand"] = d.InstallCommand
-	}
-	if d.BuildCommand != "" {
-		body["buildCommand"] = d.BuildCommand
-	}
-	if d.StartCommand != "" {
-		body["startCommand"] = d.StartCommand
-	}
-	if d.OutputDirectory != "" {
-		body["outputDirectory"] = d.OutputDirectory
-	}
-	if d.RootDirectory != "" {
-		body["rootDirectory"] = d.RootDirectory
-	}
-	if d.PreStartCommand != "" {
-		body["preStartCommand"] = d.PreStartCommand
+	if d.ServiceType == "mcp" {
+		req.AuthEnabled = &d.AuthEnabled
 	}
 	if d.RegistryUser != "" && d.RegistryToken != "" {
-		body["registry_credentials"] = map[string]string{
-			"username": d.RegistryUser,
-			"token":    d.RegistryToken,
+		req.RegistryCredentials = &client.RegistryCredentials{
+			Username: d.RegistryUser,
+			Token:    d.RegistryToken,
 		}
 	}
-	if d.CronEnabled {
-		body["cronEnabled"] = true
-		body["cronExpression"] = d.CronExpression
-		body["cronTimezone"] = d.CronTimezone
-	}
-	return body
+	return req
 }
 
-func loadFrameworkSlugs(ctx context.Context) ([]string, error) {
-	var data any
+func loadFrameworks(ctx context.Context) ([]client.Framework, error) {
+	var data []client.Framework
 	err := ui.WithSpinner("Loading frameworks…", func() error {
 		var err error
 		data, err = coreClient.GetFrameworks(ctx)
@@ -589,43 +641,71 @@ func loadFrameworkSlugs(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return slugsOnly(data), nil
+	out := make([]client.Framework, 0, len(data))
+	for _, f := range data {
+		if f.Slug != "" {
+			out = append(out, f)
+		}
+	}
+	return out, nil
 }
 
-func loadRegionOptions(ctx context.Context) ([]ui.Option, error) {
-	var data any
+func pickFramework(frameworks []client.Framework, detected string) (client.Framework, error) {
+	if len(frameworks) == 0 {
+		return client.Framework{}, fmt.Errorf("no frameworks available from Brimble")
+	}
+	bySlug := map[string]client.Framework{}
+	opts := make([]ui.Option, 0, len(frameworks))
+	for _, f := range frameworks {
+		bySlug[f.Slug] = f
+		label := cmp.Or(f.Name, f.Slug)
+		if f.Slug == detected {
+			opts = append([]ui.Option{{Label: label + " (detected)", Value: f.Slug}}, opts...)
+			continue
+		}
+		opts = append(opts, ui.Option{Label: label, Value: f.Slug})
+	}
+	slug, err := ui.Select("Framework", opts)
+	if err != nil {
+		return client.Framework{}, err
+	}
+	return bySlug[slug], nil
+}
+
+func loadRegionOptions(ctx context.Context) ([]ui.Option, string, error) {
+	var catalog client.RegionCatalog
 	err := ui.WithSpinner("Loading regions…", func() error {
 		var err error
-		data, err = coreClient.GetRegions(ctx)
+		catalog, err = coreClient.GetRegions(ctx)
 		return err
 	})
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
-	items := asSlice(unwrapList(data))
-	opts := make([]ui.Option, 0, len(items))
-	for _, item := range items {
-		m, ok := item.(map[string]any)
-		if !ok {
+	var opts []ui.Option
+	defaultID := ""
+	for _, r := range catalog.Regions() {
+		if r.ID == "" || r.Name == "" || r.Type != "web" {
 			continue
 		}
-		id := firstString(m, "_id", "id")
-		name := firstString(m, "name", "slug", "code", "region")
-		if id == "" && name == "" {
+		if !r.Enabled || !r.Available {
 			continue
 		}
-		label := name
-		if label == "" {
-			label = id
+		if r.Eligible != nil && !*r.Eligible {
+			continue
 		}
-		value := id
-		if value == "" {
-			value = name
+		label := r.Name
+		if r.Country != "" {
+			label += " · " + r.Country
 		}
-		opts = append(opts, ui.Option{Label: label, Value: value})
+		if r.Default {
+			label += " (default)"
+			defaultID = r.ID
+		}
+		opts = append(opts, ui.Option{Label: label, Value: r.ID})
 	}
-	return opts, nil
+	return opts, defaultID, nil
 }
 
 func isNoBuildFramework(framework string) bool {
@@ -644,4 +724,12 @@ func slugifyName(s string) string {
 		s = strings.ReplaceAll(s, "--", "-")
 	}
 	return s
+}
+
+func lastPathPart(p string) string {
+	p = strings.TrimRight(p, `/\`)
+	if i := strings.LastIndexAny(p, `/\`); i >= 0 {
+		return p[i+1:]
+	}
+	return p
 }

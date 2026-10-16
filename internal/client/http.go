@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"strings"
@@ -55,9 +56,12 @@ type APIError struct {
 
 func (e *APIError) Error() string {
 	if e.Message != "" {
-		return fmt.Sprintf("api error %d: %s", e.Status, e.Message)
+		return fmt.Sprintf("%s (HTTP %d)", e.Message, e.Status)
 	}
-	return fmt.Sprintf("api error %d: %s", e.Status, truncate(e.Body, 300))
+	if strings.TrimSpace(e.Body) == "" {
+		return fmt.Sprintf("request failed (HTTP %d)", e.Status)
+	}
+	return fmt.Sprintf("request failed (HTTP %d): %s", e.Status, truncate(e.Body, 300))
 }
 
 type envelope struct {
@@ -74,6 +78,8 @@ type Request struct {
 	TeamID  string
 	Raw     bool
 	Headers map[string]string
+
+	rawBody []byte
 }
 
 func (c *HTTPClient) DoJSON(ctx context.Context, req Request, out any) (string, error) {
@@ -132,7 +138,9 @@ func (c *HTTPClient) do(ctx context.Context, req Request) ([]byte, int, error) {
 	}
 
 	var bodyReader io.Reader
-	if req.Body != nil {
+	if req.rawBody != nil {
+		bodyReader = bytes.NewReader(req.rawBody)
+	} else if req.Body != nil {
 		b, err := json.Marshal(req.Body)
 		if err != nil {
 			return nil, 0, fmt.Errorf("encode body: %w", err)
@@ -184,11 +192,72 @@ func parseAPIError(status int, body []byte) error {
 	apiErr := &APIError{Status: status, Body: string(body)}
 	var payload struct {
 		Message string `json:"message"`
+		Errors  []struct {
+			Msg  string `json:"msg"`
+			Path string `json:"path"`
+		} `json:"errors"`
 	}
-	if err := json.Unmarshal(body, &payload); err == nil && payload.Message != "" {
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return apiErr
+	}
+	if payload.Message != "" {
 		apiErr.Message = payload.Message
+		return apiErr
 	}
+	// Validation failures: { errors: [{ msg, path }] }
+	var parts []string
+	for _, e := range payload.Errors {
+		switch {
+		case e.Path != "" && e.Msg != "":
+			parts = append(parts, e.Path+": "+e.Msg)
+		case e.Msg != "":
+			parts = append(parts, e.Msg)
+		}
+	}
+	apiErr.Message = strings.Join(parts, "; ")
 	return apiErr
+}
+
+// FormFile is one file part of a multipart upload.
+type FormFile struct {
+	Field    string
+	FileName string
+	Content  io.Reader
+}
+
+// DoMultipart sends a multipart/form-data request and decodes the standard
+// { message, data } envelope into out.
+func (c *HTTPClient) DoMultipart(ctx context.Context, req Request, fields map[string]string, files []FormFile, out any) (string, error) {
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	for k, v := range fields {
+		if v == "" {
+			continue
+		}
+		if err := mw.WriteField(k, v); err != nil {
+			return "", err
+		}
+	}
+	for _, f := range files {
+		part, err := mw.CreateFormFile(f.Field, f.FileName)
+		if err != nil {
+			return "", err
+		}
+		if _, err := io.Copy(part, f.Content); err != nil {
+			return "", err
+		}
+	}
+	if err := mw.Close(); err != nil {
+		return "", err
+	}
+
+	req.Body = nil
+	req.rawBody = buf.Bytes()
+	if req.Headers == nil {
+		req.Headers = map[string]string{}
+	}
+	req.Headers["Content-Type"] = mw.FormDataContentType()
+	return c.DoJSON(ctx, req, out)
 }
 
 func truncate(s string, n int) string {

@@ -1,11 +1,13 @@
 package cmd
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -15,136 +17,186 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func newLogCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:     "log",
-		Aliases: []string{"logs"},
-		Short:   "Deployment and request logs",
-	}
+type streamFlags struct {
+	since time.Duration
+	query string
+	limit int
+}
 
+func addStreamFlags(cmd *cobra.Command, f *streamFlags) {
+	cmd.Flags().DurationVar(&f.since, "since", 15*time.Minute, "How far back to start (e.g. 15m, 1h)")
+	cmd.Flags().StringVarP(&f.query, "query", "q", "", "Only show lines containing this text")
+	cmd.Flags().IntVar(&f.limit, "limit", 150, "Max lines per batch")
+}
+
+func newLogCmd() *cobra.Command {
+	var f streamFlags
+
+	cmd := &cobra.Command{
+		Use:     "logs [project]",
+		Aliases: []string{"log"},
+		Short:   "Stream live logs, or inspect deployments and requests",
+		Long: `Stream live application logs for a project until you press Ctrl+C.
+
+Subcommands show deployment history, build logs and HTTP request logs.`,
+		Example: `  brimble logs
+  brimble logs my-api -q error --since 1h
+  brimble logs list
+  brimble logs download`,
+		Args: cobra.MaximumNArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			run(func(ctx context.Context) error {
+				return streamLogs(ctx, argOr(args, 0), f)
+			})
+		},
+	}
+	addStreamFlags(cmd, &f)
+
+	cmd.AddCommand(newLogStreamCmd())
 	cmd.AddCommand(newLogListCmd())
 	cmd.AddCommand(newLogSearchCmd())
 	cmd.AddCommand(newLogDownloadCmd())
 	cmd.AddCommand(newLogRequestsCmd())
-	cmd.AddCommand(newLogStreamCmd())
 	return cmd
 }
 
 func newLogStreamCmd() *cobra.Command {
-	var since time.Duration
-	var query string
-	var limit int
-
+	var f streamFlags
 	cmd := &cobra.Command{
 		Use:   "stream [project]",
-		Short: "Stream live application logs",
-		Long: `Tail live application logs (same path as the dashboard).
-
-Connects to Core's /loki Socket.IO namespace, emits "tail", and prints
-lines from "logs" events until you hit Ctrl+C.
-
-Requires log.read on the API key. Auth uses your API key as the socket token.`,
-		Args: cobra.MaximumNArgs(1),
+		Short: "Stream live application logs (same as `brimble logs`)",
+		Args:  cobra.MaximumNArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			run(func(ctx context.Context) error {
-				arg := ""
-				if len(args) > 0 {
-					arg = args[0]
-				}
-				ref, err := pickProject(ctx, arg)
-				if err != nil {
-					return err
-				}
-
-				startNs := time.Now().Add(-since).UnixNano()
-				if since <= 0 {
-					startNs = time.Now().Add(-1 * time.Hour).UnixNano()
-				}
-
-				pipeline := ""
-				if query != "" {
-					escaped := strings.ReplaceAll(query, `\`, `\\`)
-					escaped = strings.ReplaceAll(escaped, `"`, `\"`)
-					pipeline = `|= "` + escaped + `"`
-				}
-
-				ui.Info("Streaming logs for %s  (Ctrl+C to stop)", ref.Display())
-
-				streamCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
-				defer stop()
-
-				err = client.StreamLogs(streamCtx, client.StreamLogsOpts{
-					ProjectID:   ref.APIKey(),
-					Query:       pipeline,
-					StartNs:     startNs,
-					Limit:       limit,
-					APIKey:      cfg.APIKey,
-					CoreBaseURL: cfg.CoreBaseURL,
-					OnLine: func(line client.LogLine) {
-						ts := ""
-						if line.EpochMs > 0 {
-							ts = time.UnixMilli(line.EpochMs).UTC().Format("15:04:05")
-							fmt.Fprintf(os.Stdout, "%s  %s\n", ui.Dim(ts), line.Message)
-							return
-						}
-						fmt.Fprintln(os.Stdout, line.Message)
-					},
-					OnError: func(err error) {
-						ui.Warn("%s", err.Error())
-					},
-				})
-				if err != nil && streamCtx.Err() == nil {
-					return err
-				}
-				ui.Muted("Stream stopped")
-				return nil
+				return streamLogs(ctx, argOr(args, 0), f)
 			})
 		},
 	}
-
-	cmd.Flags().DurationVar(&since, "since", time.Hour, "How far back to start (e.g. 15m, 1h)")
-	cmd.Flags().StringVarP(&query, "query", "q", "", "Filter text (LogQL line contains)")
-	cmd.Flags().IntVar(&limit, "limit", 150, "Max lines per Loki batch")
+	addStreamFlags(cmd, &f)
 	return cmd
 }
 
+func streamLogs(ctx context.Context, arg string, f streamFlags) error {
+	ref, err := pickProject(ctx, arg)
+	if err != nil {
+		return err
+	}
+
+	since := f.since
+	if since <= 0 {
+		since = 15 * time.Minute
+	}
+	pipeline := ""
+	if f.query != "" {
+		escaped := strings.ReplaceAll(f.query, `\`, `\\`)
+		escaped = strings.ReplaceAll(escaped, `"`, `\"`)
+		pipeline = `|= "` + escaped + `"`
+	}
+
+	ui.Info("Streaming logs for %s %s", ref.Display(), ui.Dim("(Ctrl+C to stop)"))
+
+	streamCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	err = client.StreamLogs(streamCtx, client.StreamLogsOpts{
+		ProjectID:   ref.ID,
+		Query:       pipeline,
+		StartNs:     time.Now().Add(-since).UnixNano(),
+		Limit:       f.limit,
+		APIKey:      cfg.APIKey,
+		CoreBaseURL: cfg.CoreBaseURL,
+		OnLine: func(line client.LogLine) {
+			if jsonOutput() {
+				_ = printResult(streamLine{
+					Timestamp: time.UnixMilli(line.EpochMs).UTC().Format(time.RFC3339Nano),
+					Message:   line.Message,
+					Labels:    line.Labels,
+				})
+				return
+			}
+			if line.EpochMs > 0 {
+				ts := time.UnixMilli(line.EpochMs).Local().Format("15:04:05")
+				fmt.Fprintf(os.Stdout, "%s  %s\n", ui.Dim(ts), line.Message)
+				return
+			}
+			fmt.Fprintln(os.Stdout, line.Message)
+		},
+		OnError: func(err error) {
+			ui.Warn("%s", err.Error())
+		},
+	})
+	if err != nil && streamCtx.Err() == nil {
+		return err
+	}
+	ui.Muted("Stream stopped")
+	return nil
+}
+
+type deployListFlags struct {
+	limit, page int
+	status      string
+	environment string
+}
+
+func (f deployListFlags) query() url.Values {
+	q := url.Values{}
+	if f.limit > 0 {
+		q.Set("limit", strconv.Itoa(f.limit))
+	}
+	if f.page > 0 {
+		q.Set("page", strconv.Itoa(f.page))
+	}
+	if f.status != "" {
+		q.Set("statuses", strings.ToUpper(f.status))
+	}
+	if f.environment != "" {
+		q.Set("environment", strings.ToUpper(f.environment))
+	}
+	return q
+}
+
+func addDeployListFlags(cmd *cobra.Command, f *deployListFlags) {
+	cmd.Flags().IntVar(&f.limit, "limit", 15, "Deployments per page")
+	cmd.Flags().IntVar(&f.page, "page", 0, "Page number")
+	cmd.Flags().StringVar(&f.status, "status", "", "Filter by status, e.g. FAILED or ACTIVE")
+	cmd.Flags().StringVarP(&f.environment, "environment", "e", "", "Filter by production or preview")
+}
+
 func newLogListCmd() *cobra.Command {
+	var f deployListFlags
 	var watch bool
 	var interval time.Duration
 
 	cmd := &cobra.Command{
-		Use:   "list [project]",
-		Short: "List deploy logs",
-		Args:  cobra.MaximumNArgs(1),
+		Use:     "list [project]",
+		Aliases: []string{"ls", "deployments"},
+		Short:   "List deployments",
+		Args:    cobra.MaximumNArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			run(func(ctx context.Context) error {
-				arg := ""
-				if len(args) > 0 {
-					arg = args[0]
-				}
-				ref, err := pickProject(ctx, arg)
+				ref, err := pickProject(ctx, argOr(args, 0))
 				if err != nil {
 					return err
 				}
 				fetch := func(ctx context.Context) error {
-					var data any
+					var list client.DeployLogList
 					var err error
 					load := func() error {
-						data, err = coreClient.ListDeployLogs(ctx, ref.APIKey(), cfg.TeamID)
+						list, err = coreClient.ListDeployLogs(ctx, ref.ID, f.query(), cfg.TeamID)
 						return err
 					}
 					if watch {
 						err = load()
 					} else {
-						err = ui.WithSpinner("Loading logs…", load)
+						err = ui.WithSpinner("Loading deployments…", load)
 					}
 					if err != nil {
 						return err
 					}
-					if cfg.Output == "json" {
-						return printResult(unwrapList(data))
+					if jsonOutput() {
+						return printResult(list.Logs)
 					}
-					return printLogList(ref.Display(), unwrapList(data))
+					return printDeployList(ref.Display(), list)
 				}
 				if watch {
 					return runWatch(ctx, interval, fetch)
@@ -154,55 +206,54 @@ func newLogListCmd() *cobra.Command {
 		},
 	}
 
+	addDeployListFlags(cmd, &f)
 	addWatchFlags(cmd, &watch, &interval)
 	return cmd
 }
 
 func newLogSearchCmd() *cobra.Command {
 	var query string
+	var f deployListFlags
 
 	cmd := &cobra.Command{
 		Use:   "search [project]",
-		Short: "Search deploy history",
+		Short: "Search deployments by commit message, branch or author",
 		Args:  cobra.MaximumNArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			run(func(ctx context.Context) error {
-				arg := ""
-				if len(args) > 0 {
-					arg = args[0]
-				}
-				ref, err := pickProject(ctx, arg)
+				ref, err := pickProject(ctx, argOr(args, 0))
 				if err != nil {
 					return err
 				}
 				if query == "" && ui.IsInteractive() {
-					query, err = ui.Text("Search query", "", "")
+					query, err = ui.Text("Search for", "fix login", "")
 					if err != nil {
 						return err
 					}
 				}
-				q := url.Values{}
+				q := f.query()
 				if query != "" {
-					q.Set("q", query)
+					q.Set("search", query)
 				}
-				var data any
+				var list client.DeployLogList
 				err = ui.WithSpinner("Searching…", func() error {
 					var err error
-					data, err = coreClient.SearchDeployLogs(ctx, ref.APIKey(), q, cfg.TeamID)
+					list, err = coreClient.SearchDeployLogs(ctx, ref.ID, q, cfg.TeamID)
 					return err
 				})
 				if err != nil {
 					return err
 				}
-				if cfg.Output == "json" {
-					return printResult(unwrapList(data))
+				if jsonOutput() {
+					return printResult(list.Logs)
 				}
-				return printLogList(ref.Display(), unwrapList(data))
+				return printDeployList(ref.Display(), list)
 			})
 		},
 	}
 
-	cmd.Flags().StringVarP(&query, "query", "q", "", "Search query")
+	cmd.Flags().StringVarP(&query, "query", "q", "", "Search text")
+	addDeployListFlags(cmd, &f)
 	return cmd
 }
 
@@ -210,39 +261,31 @@ func newLogDownloadCmd() *cobra.Command {
 	var outPath string
 
 	cmd := &cobra.Command{
-		Use:   "download [project] [logId]",
-		Short: "Download a deploy log",
-		Args:  cobra.RangeArgs(0, 2),
+		Use:   "download [project] [deploymentId]",
+		Short: "Print or save the build log of a deployment",
+		Long: `Print or save the build log of a deployment.
+
+Without a deployment ID you pick one from recent deployments (or, without a
+terminal, the latest one is used).`,
+		Args: cobra.RangeArgs(0, 2),
 		Run: func(cmd *cobra.Command, args []string) {
 			run(func(ctx context.Context) error {
-				projectArg := ""
-				logID := ""
-				if len(args) > 0 {
-					projectArg = args[0]
-				}
-				if len(args) > 1 {
-					logID = args[1]
-				}
-				ref, err := pickProject(ctx, projectArg)
+				ref, err := pickProject(ctx, argOr(args, 0))
 				if err != nil {
 					return err
 				}
+				logID := argOr(args, 1)
 				if logID == "" {
-					if !ui.IsInteractive() {
-						return fmt.Errorf("deploy log id is required")
-					}
-					logID, err = ui.Text("Deploy log id", "", "")
+					d, err := pickDeployment(ctx, ref, "Select a deployment", nil)
 					if err != nil {
 						return err
 					}
-					if logID == "" {
-						return fmt.Errorf("deploy log id is required")
-					}
+					logID = d.ID
 				}
 				var body []byte
-				err = ui.WithSpinner("Downloading…", func() error {
+				err = ui.WithSpinner("Downloading build log…", func() error {
 					var err error
-					body, err = coreClient.DownloadLog(ctx, ref.APIKey(), logID, cfg.TeamID)
+					body, err = coreClient.DownloadLog(ctx, ref.ID, logID, cfg.TeamID)
 					return err
 				})
 				if err != nil {
@@ -261,77 +304,165 @@ func newLogDownloadCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVarP(&outPath, "out", "O", "", "Output file (default stdout)")
+	cmd.Flags().StringVarP(&outPath, "out", "O", "", "Write to a file instead of stdout")
 	return cmd
 }
 
 func newLogRequestsCmd() *cobra.Command {
-	return &cobra.Command{
+	var limit int
+	var status, method, search string
+
+	cmd := &cobra.Command{
 		Use:   "requests [project]",
-		Short: "Fetch request logs",
-		Args:  cobra.MaximumNArgs(1),
+		Short: "Show recent HTTP requests",
+		Example: `  brimble logs requests
+  brimble logs requests --status 500 --method POST`,
+		Args: cobra.MaximumNArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			run(func(ctx context.Context) error {
-				arg := ""
-				if len(args) > 0 {
-					arg = args[0]
-				}
-				ref, err := pickProject(ctx, arg)
+				ref, err := pickProject(ctx, argOr(args, 0))
 				if err != nil {
 					return err
 				}
-				var data any
-				err = ui.WithSpinner("Loading request logs…", func() error {
+				q := url.Values{}
+				q.Set("limit", strconv.Itoa(limit))
+				if status != "" {
+					q.Set("statuses", status)
+				}
+				if method != "" {
+					q.Set("methods", strings.ToUpper(method))
+				}
+				if search != "" {
+					q.Set("search", search)
+				}
+				var list client.RequestLogList
+				err = ui.WithSpinner("Loading requests…", func() error {
 					var err error
-					data, err = coreClient.RequestLogs(ctx, ref.APIKey(), cfg.TeamID)
+					list, err = coreClient.RequestLogs(ctx, ref.ID, q, cfg.TeamID)
 					return err
 				})
 				if err != nil {
 					return err
 				}
-				return printResult(unwrapList(data))
+				if jsonOutput() {
+					return printResult(list.Logs)
+				}
+				printRequestLogs(ref.Display(), list.Logs)
+				return nil
 			})
 		},
 	}
+
+	cmd.Flags().IntVar(&limit, "limit", 50, "Number of requests")
+	cmd.Flags().StringVar(&status, "status", "", "Filter by status code, e.g. 500 or 404,500")
+	cmd.Flags().StringVar(&method, "method", "", "Filter by HTTP method, e.g. POST")
+	cmd.Flags().StringVarP(&search, "query", "q", "", "Filter by text in the URL or message")
+	return cmd
 }
 
-func printLogList(project string, data any) error {
-	items := asSlice(data)
-	ui.Title(project + " · deploys")
-	if len(items) == 0 {
-		ui.Muted("  (no deploy logs)")
+type streamLine struct {
+	Timestamp string            `json:"timestamp"`
+	Message   string            `json:"message"`
+	Labels    map[string]string `json:"labels"`
+}
+
+func deployments(list client.DeployLogList) []client.DeployLog {
+	out := make([]client.DeployLog, 0, len(list.Logs))
+	for _, d := range list.Logs {
+		d.Message = firstLine(d.Message)
+		out = append(out, d)
+	}
+	return out
+}
+
+func pickDeployment(ctx context.Context, ref ProjectRef, title string, keep func(client.DeployLog) bool) (client.DeployLog, error) {
+	var raw client.DeployLogList
+	err := ui.WithSpinner("Loading deployments…", func() error {
+		var err error
+		raw, err = coreClient.ListDeployLogs(ctx, ref.ID, url.Values{"limit": {"25"}}, cfg.TeamID)
+		return err
+	})
+	if err != nil {
+		return client.DeployLog{}, err
+	}
+	var list []client.DeployLog
+	for _, d := range deployments(raw) {
+		if keep == nil || keep(d) {
+			list = append(list, d)
+		}
+	}
+	if len(list) == 0 {
+		return client.DeployLog{}, fmt.Errorf("no matching deployments for %s", ref.Display())
+	}
+	if !ui.IsInteractive() || len(list) == 1 {
+		return list[0], nil
+	}
+	opts := make([]ui.Option, 0, len(list))
+	byID := map[string]client.DeployLog{}
+	for _, d := range list {
+		label := fmt.Sprintf("%s  %s  %s  %s", shortID(d.ID), ui.Status(d.Status), truncate(cmp.Or(d.Message, d.Branch, "—"), 50), ui.Dim(formatAgo(d.CreatedAt)))
+		opts = append(opts, ui.Option{Label: label, Value: d.ID})
+		byID[d.ID] = d
+	}
+	id, err := ui.Select(title, opts)
+	if err != nil {
+		return client.DeployLog{}, err
+	}
+	return byID[id], nil
+}
+
+func printDeployList(project string, data client.DeployLogList) error {
+	list := deployments(data)
+	ui.Title(project + " · deployments")
+	if len(list) == 0 {
+		ui.Muted("  No deployments yet — run `brimble deploy`")
 		return nil
 	}
-
-	for i, item := range items {
-		if i >= 20 {
-			ui.Muted("  … and %d more", len(items)-20)
-			break
-		}
-		m, ok := item.(map[string]any)
-		if !ok {
-			continue
-		}
-		status := firstString(m, "status", "state")
-		msg := firstString(m, "message", "commitMessage", "commit_message")
-		at := firstString(m, "createdAt", "updatedAt", "finishedAt")
-		line := status
-		if msg != "" {
-			if line != "" {
-				line += "  ·  "
-			}
-			line += truncate(msg, 60)
-		}
-		if at != "" {
-			if line != "" {
-				line += "  ·  "
-			}
-			line += formatTime(at)
-		}
-		if line == "" {
-			continue
-		}
-		ui.Bullet(line)
+	rows := make([][]string, 0, len(list))
+	for _, d := range list {
+		rows = append(rows, []string{
+			shortID(d.ID), ui.Status(d.Status), truncate(d.Message, 48), d.Branch, strings.ToLower(d.Environment), formatAgo(d.CreatedAt),
+		})
 	}
+	ui.Table([]string{"ID", "STATUS", "COMMIT", "BRANCH", "ENV", "CREATED"}, rows)
+
+	if data.TotalPages > 1 {
+		fmt.Fprintln(os.Stdout)
+		ui.Muted("  Page %d of %d · --page to see more", max(1, data.CurrentPage), data.TotalPages)
+	}
+	fmt.Fprintln(os.Stdout)
+	ui.Muted("  IDs are shortened; use the full ID from -o json, or omit it to pick from a list")
 	return nil
+}
+
+func printRequestLogs(project string, items []client.RequestLog) {
+	ui.Title(project + " · requests")
+	if len(items) == 0 {
+		ui.Muted("  No requests in this window")
+		return
+	}
+	rows := make([][]string, 0, len(items))
+	for _, item := range items {
+		status := strconv.Itoa(item.Status)
+		switch {
+		case item.Status >= 500:
+			status = ui.Red(status)
+		case item.Status >= 400:
+			status = ui.Yellow(status)
+		}
+		path := item.URL
+		if u, err := url.Parse(path); err == nil && u.Path != "" {
+			path = u.RequestURI()
+		}
+		rows = append(rows, []string{formatClock(item.Timestamp), item.Method, status, truncate(path, 70)})
+	}
+	ui.Table([]string{"TIME", "METHOD", "STATUS", "PATH"}, rows)
+	fmt.Fprintln(os.Stdout)
+}
+
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return strings.TrimSpace(s[:i])
+	}
+	return strings.TrimSpace(s)
 }
