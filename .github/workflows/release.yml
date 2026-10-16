@@ -100,7 +100,9 @@ jobs:
           SCRIPT_URL: ${{ vars.INSTALL_BUCKET && format('https://{0}.t3.tigrisfiles.io/install.sh', vars.INSTALL_BUCKET) || format('https://github.com/{0}/releases/download/{1}/install.sh', github.repository, github.ref_name) }}
           BRIMBLE_VERSION: ${{ github.ref_name }}
           BRIMBLE_INSTALL_DIR: ${{ runner.temp }}/bin
-        run: curl -fsSL "$SCRIPT_URL" | sh
+        run: |
+          curl -fsSL "$SCRIPT_URL" -o "$RUNNER_TEMP/install.sh"
+          sh "$RUNNER_TEMP/install.sh"
 
       - name: Check the installed version
         run: |
