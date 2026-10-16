@@ -16,23 +16,36 @@ x-brimble-team: <teamObjectId>
 
 ## Install
 
-From a [GitHub Release](https://github.com/brimbleapp/brimble-cli/releases) (recommended):
+Homebrew (macOS, Linux):
 
 ```bash
-# macOS / Linux — pick the archive for your OS/arch from the release assets
-tar -xzf brimble_Darwin_arm64.tar.gz   # example
-sudo mv brimble /usr/local/bin/
-brimble --version
+brew install brimblehq/tap/brimble
 ```
+
+Install script (macOS, Linux) — downloads the latest release, verifies its
+checksum and installs to `/usr/local/bin` (or `~/.local/bin`):
+
+```bash
+curl -fsSL <INSTALL_SCRIPT_URL> | sh
+
+# pin a version or choose the directory
+curl -fsSL <INSTALL_SCRIPT_URL> | BRIMBLE_VERSION=v0.2.0 BRIMBLE_INSTALL_DIR=~/bin sh
+```
+
+Every GitHub release also carries the script, so this works before the S3 URL
+exists: `https://github.com/brimblehq/anarchy/releases/latest/download/install.sh`.
+
+Windows: download the zip for your architecture from the
+[releases page](https://github.com/brimblehq/anarchy/releases).
+
+Upgrade later with `brimble upgrade` (uses brew or `go install` when that's how
+it was installed; otherwise downloads, verifies and replaces itself).
 
 From source:
 
 ```bash
-make build
-# binary: ./bin/brimble
-
-# or
-go install github.com/brimbleapp/brimble-cli/cmd/brimble@latest
+make build                     # binary: ./bin/brimble
+go install github.com/brimblehq/anarchy/cmd/brimble@latest
 ```
 
 ## Quick start
@@ -49,6 +62,33 @@ existing project or create a new one (from GitHub, GitLab, Bitbucket, a Docker
 image, or by uploading a local folder as a static site). It then follows the
 build, printing log lines as they arrive, and exits non-zero if the deployment
 fails.
+
+## Coding agents (MCP)
+
+Connect Brimble's MCP server to the coding agents on your machine so you can
+ask them to deploy, read logs or manage projects:
+
+```bash
+brimble mcp                          # detects your agents; pick, choose sign-in, done
+brimble mcp cursor claude-code       # specific agents
+brimble mcp --all --auth api-key -y  # every detected agent, no prompts (CI/dotfiles)
+brimble mcp status                   # which agents have Brimble
+brimble mcp disconnect cursor
+```
+
+Supported: Claude Code, Cursor, VS Code (Copilot), Windsurf, Codex, Gemini CLI,
+opencode and Zed are configured automatically; Claude Desktop and Grok Build get
+step-by-step instructions (they're set up inside the app).
+
+Sign-in: **browser** (default) writes only the server URL and the agent asks
+you to approve Brimble on first use — no secret is saved, and you don't need
+`brimble login`. **api-key** reuses this CLI's key (checked first), so the
+agent works immediately; the key is stored in that agent's config. Zed only
+supports the API key.
+
+Only the `brimble` entry is touched: other servers, settings and key order are
+kept, and files with comments are never rewritten (you get the snippet to
+paste instead).
 
 ## Linked directories
 
@@ -83,6 +123,7 @@ brimble deploy [project]           # --detach, --no-logs, --restart, --dir ./dis
 brimble status [project]           # details + recent deployments
 brimble open [project]             # open the live URL
 brimble logs [project]             # live logs; -q error --since 1h
+brimble logs build [project] [id]  # stream a deployment's build logs live (latest running one by default)
 brimble logs list                  # deployment history (--status FAILED, --watch)
 brimble logs download [project] [deploymentId]
 brimble logs requests              # HTTP requests; --status 500 --method POST
@@ -91,7 +132,7 @@ brimble logs search -q "fix login"
 # Projects
 brimble project list               # --type, --status, --environment, --watch
 brimble project get [project]
-brimble project create             # interactive, or -f body.json
+brimble project create             # interactive, or --repo acme/web / --image nginx:1.27 / --dir ./dist
 brimble project redeploy | rollback | restart | cancel [project]
 brimble project start | stop [project]
 brimble project maintenance [project] on|off
@@ -101,6 +142,12 @@ brimble project transfer [project] --to <team>
 brimble project connect-repo | disconnect-repo [project]
 brimble project stats [project]    # CPU, memory, traffic, latency
 brimble project delete [project]   # asks you to type the name; --delete-volume
+
+# Config as code (brimble.toml)
+brimble config pull                # write brimble.toml from the project's current settings
+brimble config validate            # check the file before committing
+brimble config plan                # preview what it would change; optionally apply
+brimble config approve | reject    # act on changes a paused deploy is waiting on
 
 # Environment variables
 brimble env list [--reveal]
@@ -173,22 +220,47 @@ internal/cmd/         cobra commands
 
 ## Release
 
-CI runs on every push/PR (vet, test, build, `goreleaser check`).
+CI runs on every push/PR: vet, test, build, `shellcheck` on the install
+scripts and `goreleaser check`.
 
-To ship a new version, tag and push:
+To ship a version, tag and push:
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
-That triggers [.github/workflows/release.yml](.github/workflows/release.yml), which runs [GoReleaser](https://goreleaser.com) and publishes archives + checksums to the GitHub Release.
+[release.yml](.github/workflows/release.yml) then:
+
+1. **GitHub release** — GoReleaser builds macOS, Linux and Windows archives
+   (amd64 + arm64, with shell completions), `checksums.txt` and `install.sh`.
+2. **Homebrew** — pushes `Casks/brimble.rb` to the tap repo.
+3. **Tigris** — uploads `scripts/install.sh` to the install bucket.
+4. **Verify** — installs the tag with the published script on Ubuntu and
+   macOS and checks the version.
+
+One-time setup (Settings → Secrets and variables → Actions):
+
+| Name | Kind | Purpose |
+|------|------|---------|
+| `HOMEBREW_TAP_DEPLOY_KEY` | secret | Private SSH key whose public half is a write deploy key on `brimblehq/homebrew-tap` |
+| `AWS_ACCESS_KEY_ID` | secret | Tigris access key (`tid_…`) |
+| `AWS_SECRET_ACCESS_KEY` | secret | Tigris secret key (`tsec_…`) |
+| `INSTALL_BUCKET` | variable | Public Tigris bucket for `install.sh` |
+
+Any step whose settings are missing is skipped. The script is published at
+`https://<INSTALL_BUCKET>.t3.tigrisfiles.io/install.sh`; create the bucket as
+public (`--acl public-read`) so `curl` can read it.
+
+The repo must be public: Homebrew and the install script download archives
+from the GitHub release without credentials. The tap repo
+(`brimblehq/homebrew-tap`) must exist.
 
 Local dry-runs (GoReleaser is pulled via `go run` if you don’t have it installed):
 
 ```bash
-make snapshot        # build dist/ without publishing (works without git)
-make release-dry-run # full pipeline without publish (needs a git repo + tag; falls back to snapshot otherwise)
+make snapshot        # build dist/ (archives, checksums, cask) without publishing
+make release-dry-run # full pipeline without publish (needs a git repo + tag)
 ```
 
 ## License

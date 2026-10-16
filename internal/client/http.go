@@ -12,16 +12,17 @@ import (
 	"strings"
 	"time"
 
-	"github.com/brimbleapp/brimble-cli/internal/auth"
+	"github.com/brimblehq/anarchy/internal/auth"
 )
 
 const maxResponseBytes = 16 << 20
 
 type HTTPClient struct {
-	baseURL     string
-	httpClient  *http.Client
-	credentials auth.Credentials
-	userAgent   string
+	baseURL      string
+	httpClient   *http.Client
+	credentials  auth.Credentials
+	userAgent    string
+	streamClient *http.Client // no overall Timeout; streams stay open for minutes
 }
 
 type HTTPOptions struct {
@@ -45,6 +46,10 @@ func NewHTTP(opts HTTPOptions) *HTTPClient {
 		httpClient:  &http.Client{Timeout: timeout},
 		credentials: opts.Credentials,
 		userAgent:   ua,
+		streamClient: &http.Client{Transport: &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			ResponseHeaderTimeout: timeout,
+		}},
 	}
 }
 
@@ -129,9 +134,27 @@ func (c *HTTPClient) DoBytes(ctx context.Context, req Request) ([]byte, int, err
 }
 
 func (c *HTTPClient) do(ctx context.Context, req Request) ([]byte, int, error) {
+	httpReq, err := c.newRequest(ctx, req)
+	if err != nil {
+		return nil, 0, err
+	}
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+	if err != nil {
+		return nil, resp.StatusCode, fmt.Errorf("read body: %w", err)
+	}
+	return respBody, resp.StatusCode, nil
+}
+
+func (c *HTTPClient) newRequest(ctx context.Context, req Request) (*http.Request, error) {
 	u, err := url.Parse(c.baseURL + req.Path)
 	if err != nil {
-		return nil, 0, fmt.Errorf("parse url: %w", err)
+		return nil, fmt.Errorf("parse url: %w", err)
 	}
 	if len(req.Query) > 0 {
 		u.RawQuery = req.Query.Encode()
@@ -143,14 +166,14 @@ func (c *HTTPClient) do(ctx context.Context, req Request) ([]byte, int, error) {
 	} else if req.Body != nil {
 		b, err := json.Marshal(req.Body)
 		if err != nil {
-			return nil, 0, fmt.Errorf("encode body: %w", err)
+			return nil, fmt.Errorf("encode body: %w", err)
 		}
 		bodyReader = bytes.NewReader(b)
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, req.Method, u.String(), bodyReader)
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
 
 	if req.Body != nil {
@@ -174,18 +197,25 @@ func (c *HTTPClient) do(ctx context.Context, req Request) ([]byte, int, error) {
 	for k, v := range req.Headers {
 		httpReq.Header.Set(k, v)
 	}
+	return httpReq, nil
+}
 
-	resp, err := c.httpClient.Do(httpReq)
+func (c *HTTPClient) openStream(ctx context.Context, req Request) (*http.Response, error) {
+	httpReq, err := c.newRequest(ctx, req)
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+	httpReq.Header.Set("Accept", "text/event-stream")
+	resp, err := c.streamClient.Do(httpReq)
 	if err != nil {
-		return nil, resp.StatusCode, fmt.Errorf("read body: %w", err)
+		return nil, err
 	}
-	return respBody, resp.StatusCode, nil
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		return nil, parseAPIError(resp.StatusCode, body)
+	}
+	return resp, nil
 }
 
 func parseAPIError(status int, body []byte) error {

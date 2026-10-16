@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/brimbleapp/brimble-cli/internal/client"
-	"github.com/brimbleapp/brimble-cli/internal/ui"
+	"github.com/brimblehq/anarchy/internal/client"
+	"github.com/brimblehq/anarchy/internal/ui"
 	"github.com/spf13/cobra"
 )
 
@@ -160,7 +160,7 @@ func newProjectGetCmd() *cobra.Command {
 }
 
 func newProjectCreateCmd() *cobra.Command {
-	var file string
+	var f createFlags
 	var detach, noLogs bool
 
 	cmd := &cobra.Command{
@@ -168,34 +168,46 @@ func newProjectCreateCmd() *cobra.Command {
 		Short: "Create a project and deploy it",
 		Long: `Create a project from a Git repository, a Docker image or a local folder.
 
-In a terminal you are walked through the same steps as the dashboard. For
-scripts, pass a Core create body with --file (see the API reference for
-POST /v1/projects).`,
+In a terminal you're walked through the same steps as the dashboard. In
+scripts, pass --repo, --image or --dir.
+
+Build, start, resources and the rest of a project's settings live in
+brimble.toml in your repository; Brimble applies it on each deploy. Start
+one from an existing project with "brimble config pull".`,
 		Example: `  brimble project create
-  brimble project create -f project.json --detach`,
+  brimble project create --repo acme/web --branch main --region eu-central
+  brimble project create --image nginx:1.27 --name edge
+  brimble project create --dir ./dist --name docs-site`,
 		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			run(func(ctx context.Context) error {
-				var body json.RawMessage
-				if file != "" {
+				var draft *createDraft
+				if f.given() {
 					var err error
-					if body, err = readJSONFile(file); err != nil {
+					if draft, err = draftFromFlags(ctx, f); err != nil {
 						return err
 					}
 				}
-				return runCreate(ctx, body, createOptions{detach: detach, noLogs: noLogs})
+				return runCreate(ctx, draft, createOptions{detach: detach, noLogs: noLogs})
 			})
 		},
 	}
 
-	cmd.Flags().StringVarP(&file, "file", "f", "", "JSON body for non-interactive create (- for stdin)")
+	cmd.Flags().StringVar(&f.repo, "repo", "", "Git repository to deploy, as owner/name")
+	cmd.Flags().StringVar(&f.git, "git", "github", "Git provider for --repo: github, gitlab or bitbucket")
+	cmd.Flags().StringVar(&f.branch, "branch", "", "Production branch (default: the repository's default branch)")
+	cmd.Flags().StringVar(&f.image, "image", "", "Docker image to deploy, e.g. nginx:1.27")
+	cmd.Flags().StringVar(&f.dir, "dir", "", "Local folder to upload as a static site")
+	cmd.Flags().StringVar(&f.name, "name", "", "Project name (default: from the repo, image or folder)")
+	cmd.Flags().StringVar(&f.serviceType, "type", "", "Service type: web-service (default), static, worker or mcp")
+	cmd.Flags().StringVar(&f.region, "region", "", "Region name, e.g. eu-central (default: your plan's default)")
+	cmd.Flags().BoolVar(&f.noDeploy, "no-deploy", false, "Create without deploying")
 	cmd.Flags().BoolVarP(&detach, "detach", "d", false, "Don't follow the first deployment")
 	cmd.Flags().BoolVar(&noLogs, "no-logs", false, "Follow the deployment without printing build output")
 	return cmd
 }
 
 func newProjectRedeployCmd() *cobra.Command {
-	var file string
 	var detach, noLogs bool
 
 	cmd := &cobra.Command{
@@ -203,8 +215,8 @@ func newProjectRedeployCmd() *cobra.Command {
 		Short: "Rebuild and deploy the latest commit",
 		Long: `Rebuild and deploy the latest commit of the production branch.
 
-Pass --file with a JSON body to change build settings while redeploying (for
-example {"name": "web", "buildCommand": "npm run build:prod"}).`,
+To change build or runtime settings, edit brimble.toml in your repository
+and push; preview a change first with "brimble config plan".`,
 		Args: cobra.MaximumNArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			run(func(ctx context.Context) error {
@@ -212,18 +224,7 @@ example {"name": "web", "buildCommand": "npm run build:prod"}).`,
 				if err != nil {
 					return err
 				}
-				var body json.RawMessage
-				if file != "" {
-					raw, err := readJSONFile(file)
-					if err != nil {
-						return err
-					}
-					if len(raw) == 0 || raw[0] != '{' {
-						return fmt.Errorf("%s must contain a JSON object", file)
-					}
-					body = raw
-				}
-				logID, err := redeploy(ctx, ref, body, false)
+				logID, err := redeploy(ctx, ref, nil, false)
 				if err != nil {
 					return err
 				}
@@ -232,7 +233,6 @@ example {"name": "web", "buildCommand": "npm run build:prod"}).`,
 		},
 	}
 
-	cmd.Flags().StringVarP(&file, "file", "f", "", "JSON body with settings to apply")
 	cmd.Flags().BoolVarP(&detach, "detach", "d", false, "Don't follow the deployment")
 	cmd.Flags().BoolVar(&noLogs, "no-logs", false, "Follow the deployment without printing build output")
 	return cmd
@@ -572,15 +572,18 @@ func newProjectDeleteCmd() *cobra.Command {
 }
 
 func newProjectLinkCmd() *cobra.Command {
-	var file string
+	var repo, branch, git string
 
 	cmd := &cobra.Command{
 		Use:   "connect-repo [project]",
 		Short: "Connect a Git repository to a project",
 		Long: `Connect a Git repository to a project, so pushes to its branch deploy it.
 
-You pick the provider, account, repository and branch. To link this
-directory to a project instead, use "brimble link".`,
+In a terminal you pick the provider, account, repository and branch; in
+scripts pass --repo. To link this directory to a project instead, use
+"brimble link".`,
+		Example: `  brimble project connect-repo
+  brimble project connect-repo my-api --repo acme/api --branch main`,
 		Args: cobra.MaximumNArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			run(func(ctx context.Context) error {
@@ -588,20 +591,23 @@ directory to a project instead, use "brimble link".`,
 				if err != nil {
 					return err
 				}
-				var body json.RawMessage
-				if file != "" {
-					if body, err = readJSONFile(file); err != nil {
-						return err
-					}
-				} else {
-					req, err := repoLinkQuestionnaire(ctx)
+				var req client.LinkRepoRequest
+				if repo != "" {
+					source := strings.ToLower(git)
+					found, installationID, err := findRepo(ctx, source, repo)
 					if err != nil {
 						return err
 					}
-					body, err = json.Marshal(req)
-					if err != nil {
-						return err
-					}
+					req = client.LinkRepoRequest{Type: "repo", Repo: client.LinkRepoSpec{
+						Name: found.FullName, Branch: cmp.Or(branch, found.Branch, "main"),
+						Git: strings.ToUpper(source), InstallationID: installationID,
+					}}
+				} else if req, err = repoLinkQuestionnaire(ctx); err != nil {
+					return err
+				}
+				body, err := json.Marshal(req)
+				if err != nil {
+					return err
 				}
 				err = ui.WithSpinner("Connecting repository…", func() error {
 					return coreClient.LinkProject(ctx, ref.ID, body, cfg.TeamID)
@@ -609,20 +615,22 @@ directory to a project instead, use "brimble link".`,
 				if err != nil {
 					return err
 				}
-				ui.Success("Connected the repository to %s", ref.Display())
+				ui.Success("Connected %s to %s", req.Repo.Name, ref.Display())
 				ui.Hint("Deploy it with `brimble deploy %s`", ref.Name)
 				return nil
 			})
 		},
 	}
 
-	cmd.Flags().StringVarP(&file, "file", "f", "", "JSON body instead of prompts")
+	cmd.Flags().StringVar(&repo, "repo", "", "Repository as owner/name (skips the prompts)")
+	cmd.Flags().StringVar(&branch, "branch", "", "Branch to deploy (default: the repository's default branch)")
+	cmd.Flags().StringVar(&git, "git", "github", "Git provider: github, gitlab or bitbucket")
 	return cmd
 }
 
 func repoLinkQuestionnaire(ctx context.Context) (client.LinkRepoRequest, error) {
 	if !ui.IsInteractive() {
-		return client.LinkRepoRequest{}, fmt.Errorf("not a terminal; pass --file with a JSON body")
+		return client.LinkRepoRequest{}, fmt.Errorf("not a terminal; pass --repo owner/name")
 	}
 	source, err := ui.Select("Git provider", []ui.Option{
 		{Label: "GitHub", Value: "github"},

@@ -1,5 +1,15 @@
 name: Release
 
+# Tag to release:  git tag v0.2.0 && git push origin v0.2.0
+#
+# Repository settings (Settings → Secrets and variables → Actions):
+#   secrets.HOMEBREW_TAP_DEPLOY_KEY    Private SSH key; its public half is a
+#                                      write deploy key on brimblehq/homebrew-tap.
+#   secrets.AWS_ACCESS_KEY_ID          Tigris access key (tid_…).
+#   secrets.AWS_SECRET_ACCESS_KEY      Tigris secret key (tsec_…).
+#   vars.INSTALL_BUCKET                Public Tigris bucket for install.sh.
+# Any step whose settings are missing is skipped.
+
 on:
   push:
     tags:
@@ -10,7 +20,7 @@ permissions:
 
 jobs:
   release:
-    name: GoReleaser
+    name: GitHub release and Homebrew
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -28,7 +38,62 @@ jobs:
         uses: goreleaser/goreleaser-action@v6
         with:
           distribution: goreleaser
-          version: "~> v2"
+          version: "v2.18.3"
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HOMEBREW_TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+          INSTALL_SCRIPT_URL: ${{ vars.INSTALL_BUCKET && format('https://{0}.t3.tigrisfiles.io/install.sh', vars.INSTALL_BUCKET) || '' }}
+
+  install-script:
+    name: Upload install script to Tigris
+    needs: release
+    if: vars.INSTALL_BUCKET != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Upload install.sh
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: auto
+          BUCKET: ${{ vars.INSTALL_BUCKET }}
+        run: |
+          aws s3 cp scripts/install.sh "s3://$BUCKET/install.sh" \
+            --endpoint-url https://t3.storage.dev \
+            --content-type "text/x-shellscript; charset=utf-8" \
+            --cache-control "public, max-age=300"
+          echo "Install with: curl -fsSL https://$BUCKET.t3.tigrisfiles.io/install.sh | sh"
+
+  verify-install:
+    name: Verify install (${{ matrix.os }})
+    needs: [release, install-script]
+    # Run after the S3 upload, or straight after the release when it was skipped.
+    if: always() && needs.release.result == 'success' && needs.install-script.result != 'failure'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    steps:
+      - name: Install with the published script
+        env:
+          SCRIPT_URL: ${{ vars.INSTALL_BUCKET && format('https://{0}.t3.tigrisfiles.io/install.sh', vars.INSTALL_BUCKET) || format('https://github.com/{0}/releases/download/{1}/install.sh', github.repository, github.ref_name) }}
+          BRIMBLE_VERSION: ${{ github.ref_name }}
+          BRIMBLE_INSTALL_DIR: ${{ runner.temp }}/bin
+        run: curl -fsSL "$SCRIPT_URL" | sh
+
+      - name: Check the installed version
+        run: |
+          out=$("${{ runner.temp }}/bin/brimble" --version)
+          echo "$out"
+          case "$out" in
+            *"${GITHUB_REF_NAME#v}"*) ;;
+            *) echo "expected version ${GITHUB_REF_NAME#v}"; exit 1 ;;
+          esac

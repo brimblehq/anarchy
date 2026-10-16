@@ -1,4 +1,4 @@
-module github.com/brimbleapp/brimble-cli
+module github.com/brimblehq/anarchy
 
 go 1.25.1
 

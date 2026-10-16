@@ -23,9 +23,9 @@ builds:
       - arm64
     ldflags:
       - -s -w
-      - -X github.com/brimbleapp/brimble-cli/internal/cmd.version={{.Version}}
-      - -X github.com/brimbleapp/brimble-cli/internal/cmd.commit={{.ShortCommit}}
-      - -X github.com/brimbleapp/brimble-cli/internal/cmd.date={{.Date}}
+      - -X github.com/brimblehq/anarchy/internal/cmd.version={{.Version}}
+      - -X github.com/brimblehq/anarchy/internal/cmd.commit={{.ShortCommit}}
+      - -X github.com/brimblehq/anarchy/internal/cmd.date={{.Date}}
 
 archives:
   - formats: [tar.gz]
@@ -46,8 +46,8 @@ archives:
 checksum:
   name_template: checksums.txt
 
-# Homebrew cask in the tap repo: brew install brimbleapp/tap/brimble
-# Publishing needs HOMEBREW_TAP_GITHUB_TOKEN with write access to the tap;
+# Homebrew cask in the tap repo: brew install brimblehq/tap/brimble
+# Pushed over SSH with the tap's deploy key (HOMEBREW_TAP_DEPLOY_KEY);
 # without it the cask is generated but not pushed.
 homebrew_casks:
   - name: brimble
@@ -55,11 +55,13 @@ homebrew_casks:
     description: Deploy and manage apps on Brimble from your terminal
     homepage: https://brimble.io
     repository:
-      owner: '{{ envOrDefault "HOMEBREW_TAP_OWNER" "brimbleapp" }}'
-      name: '{{ envOrDefault "HOMEBREW_TAP_REPO" "homebrew-tap" }}'
-      token: '{{ envOrDefault "HOMEBREW_TAP_GITHUB_TOKEN" "" }}'
-    # Skip the tap push (but still build the cask) until the token is set.
-    skip_upload: '{{ if eq (envOrDefault "HOMEBREW_TAP_GITHUB_TOKEN" "") "" }}true{{ end }}'
+      owner: brimblehq
+      name: homebrew-tap
+      git:
+        url: git@github.com:brimblehq/homebrew-tap.git
+        private_key: '{{ envOrDefault "HOMEBREW_TAP_DEPLOY_KEY" "" }}'
+    # Skip the tap push (but still build the cask) until the key is set.
+    skip_upload: '{{ if eq (envOrDefault "HOMEBREW_TAP_DEPLOY_KEY" "") "" }}true{{ end }}'
     directory: Casks
     commit_author:
       name: brimble-bot
@@ -88,8 +90,8 @@ changelog:
 
 release:
   github:
-    owner: brimbleapp
-    name: brimble-cli
+    owner: brimblehq
+    name: anarchy
   extra_files:
     - glob: scripts/install.sh
   footer: >-
@@ -100,13 +102,13 @@ release:
 
     ```bash
     # Homebrew (macOS, Linux)
-    brew install brimbleapp/tap/brimble
+    brew install brimblehq/tap/brimble
 
     # Install script (macOS, Linux)
-    curl -fsSL {{ envOrDefault "INSTALL_SCRIPT_URL" (printf "https://github.com/brimbleapp/brimble-cli/releases/download/%s/install.sh" .Tag) }} | sh
+    curl -fsSL {{ envOrDefault "INSTALL_SCRIPT_URL" (printf "https://github.com/brimblehq/anarchy/releases/download/%s/install.sh" .Tag) }} | sh
 
     # From source
-    go install github.com/brimbleapp/brimble-cli/cmd/brimble@{{ .Tag }}
+    go install github.com/brimblehq/anarchy/cmd/brimble@{{ .Tag }}
     ```
 
     On Windows, download the zip for your architecture from the assets above.

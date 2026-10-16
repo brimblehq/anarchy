@@ -11,7 +11,7 @@
 #                         releases (for mirrors); must hold the same files
 set -eu
 
-REPO="brimbleapp/brimble-cli"
+REPO="brimblehq/anarchy"
 BINARY="brimble"
 
 say() { printf '%s\n' "$*"; }

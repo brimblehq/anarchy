@@ -7,8 +7,8 @@ import (
 
 	"encoding/json"
 
-	"github.com/brimbleapp/brimble-cli/internal/client"
-	"github.com/brimbleapp/brimble-cli/internal/ui"
+	"github.com/brimblehq/anarchy/internal/client"
+	"github.com/brimblehq/anarchy/internal/ui"
 	"github.com/spf13/cobra"
 )
 

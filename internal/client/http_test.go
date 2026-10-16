@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/brimbleapp/brimble-cli/internal/auth"
+	"github.com/brimblehq/anarchy/internal/auth"
 )
 
 func TestDoJSONSuccessEnvelope(t *testing.T) {

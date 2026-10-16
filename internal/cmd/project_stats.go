@@ -5,8 +5,8 @@ import (
 	"math"
 	"os"
 
-	"github.com/brimbleapp/brimble-cli/internal/client"
-	"github.com/brimbleapp/brimble-cli/internal/ui"
+	"github.com/brimblehq/anarchy/internal/client"
+	"github.com/brimblehq/anarchy/internal/ui"
 )
 
 func printProjectStats(project string, stats client.ProjectStats) error {

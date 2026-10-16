@@ -12,8 +12,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/brimbleapp/brimble-cli/internal/client"
-	"github.com/brimbleapp/brimble-cli/internal/ui"
+	"github.com/brimblehq/anarchy/internal/client"
+	"github.com/brimblehq/anarchy/internal/ui"
 	"github.com/spf13/cobra"
 )
 
@@ -52,11 +52,55 @@ Subcommands show deployment history, build logs and HTTP request logs.`,
 	}
 	addStreamFlags(cmd, &f)
 
+	cmd.AddCommand(newLogBuildCmd())
 	cmd.AddCommand(newLogStreamCmd())
 	cmd.AddCommand(newLogListCmd())
 	cmd.AddCommand(newLogSearchCmd())
 	cmd.AddCommand(newLogDownloadCmd())
 	cmd.AddCommand(newLogRequestsCmd())
+	return cmd
+}
+
+func newLogBuildCmd() *cobra.Command {
+	var noLogs bool
+	cmd := &cobra.Command{
+		Use:   "build [project] [deploymentId]",
+		Short: "Stream a deployment's build logs until it finishes",
+		Long: `Stream a deployment's build logs live, until the deployment finishes.
+
+Without a deployment ID it follows the latest deployment when it's still
+running (for example one started by a git push); otherwise you pick one.
+Finished deployments print their full log and result.`,
+		Example: `  brimble logs build
+  brimble logs build my-api 6a81bed11470bfcd2a5dbcfa`,
+		Args: cobra.RangeArgs(0, 2),
+		Run: func(cmd *cobra.Command, args []string) {
+			run(func(ctx context.Context) error {
+				ref, err := pickProject(ctx, argOr(args, 0))
+				if err != nil {
+					return err
+				}
+				logID := argOr(args, 1)
+				if logID == "" {
+					latest, err := coreClient.ListDeployLogs(ctx, ref.ID, url.Values{"limit": {"1"}}, cfg.TeamID)
+					if err != nil {
+						return err
+					}
+					if d := deployments(latest); len(d) > 0 && !deployFinished(d[0].Status) {
+						logID = d[0].ID
+					} else {
+						d, err := pickDeployment(ctx, ref, "Show the build log of", nil)
+						if err != nil {
+							return err
+						}
+						logID = d.ID
+					}
+				}
+				return followDeploy(ctx, ref, logID, !noLogs, false)
+			})
+		},
+	}
+	cmd.Flags().BoolVar(&noLogs, "no-logs", false, "Wait for the result without printing build output")
 	return cmd
 }
 
@@ -93,7 +137,7 @@ func streamLogs(ctx context.Context, arg string, f streamFlags) error {
 		pipeline = `|= "` + escaped + `"`
 	}
 
-	ui.Info("Streaming logs for %s %s", ref.Display(), ui.Dim("(Ctrl+C to stop)"))
+	ui.Info("Connecting to %s's logs…", ref.Display())
 
 	streamCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -124,6 +168,10 @@ func streamLogs(ctx context.Context, arg string, f streamFlags) error {
 		OnError: func(err error) {
 			ui.Warn("%s", err.Error())
 		},
+		OnReady: func() {
+			ui.Hint("Live — showing the last %s, then new lines as they arrive (Ctrl+C to stop)", formatSince(since))
+		},
+		Debug: debugf,
 	})
 	if err != nil && streamCtx.Err() == nil {
 		return err
@@ -465,4 +513,20 @@ func firstLine(s string) string {
 		return strings.TrimSpace(s[:i])
 	}
 	return strings.TrimSpace(s)
+}
+
+// formatSince renders a --since window, e.g. 15m, 2h or 1h30m.
+func formatSince(d time.Duration) string {
+	if d < time.Minute {
+		return d.Round(time.Second).String()
+	}
+	d = d.Round(time.Minute)
+	h, m := int(d.Hours()), int(d.Minutes())%60
+	switch {
+	case h > 0 && m > 0:
+		return fmt.Sprintf("%dh%dm", h, m)
+	case h > 0:
+		return fmt.Sprintf("%dh", h)
+	}
+	return fmt.Sprintf("%dm", m)
 }

@@ -5,9 +5,9 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS := -s -w \
-	-X github.com/brimbleapp/brimble-cli/internal/cmd.version=$(VERSION) \
-	-X github.com/brimbleapp/brimble-cli/internal/cmd.commit=$(COMMIT) \
-	-X github.com/brimbleapp/brimble-cli/internal/cmd.date=$(DATE)
+	-X github.com/brimblehq/anarchy/internal/cmd.version=$(VERSION) \
+	-X github.com/brimblehq/anarchy/internal/cmd.commit=$(COMMIT) \
+	-X github.com/brimblehq/anarchy/internal/cmd.date=$(DATE)
 
 # Prefer a local goreleaser binary; otherwise run via Go modules (no install needed).
 GORELEASER ?= $(shell command -v goreleaser 2>/dev/null)

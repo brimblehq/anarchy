@@ -32,6 +32,10 @@ type StreamLogsOpts struct {
 	CoreBaseURL string
 	OnLine      func(LogLine)
 	OnError     func(error)
+	// OnReady runs once the server's tail is open and lines can arrive.
+	OnReady func()
+	// Debug, when set, receives a trace of socket events (BRIMBLE_DEBUG=1).
+	Debug func(format string, args ...any)
 }
 
 func StreamLogs(ctx context.Context, opts StreamLogsOpts) error {
@@ -50,6 +54,10 @@ func StreamLogs(ctx context.Context, opts StreamLogsOpts) error {
 	if opts.StartNs <= 0 {
 		opts.StartNs = time.Now().Add(-1 * time.Hour).UnixNano()
 	}
+	debug := opts.Debug
+	if debug == nil {
+		debug = func(string, ...any) {}
+	}
 
 	uri, path, err := logsSocketEndpoint(opts.CoreBaseURL)
 	if err != nil {
@@ -59,7 +67,10 @@ func StreamLogs(ctx context.Context, opts StreamLogsOpts) error {
 	sockOpts := socket.DefaultOptions()
 	sockOpts.SetPath(path)
 	sockOpts.SetAuth(map[string]any{"token": opts.APIKey})
-	sockOpts.SetTransports(types.NewSet(eio.WebSocket, eio.Polling))
+	// WebSocket only: the HTTP long-polling transport of engine.io-client-go
+	// v1.1.0 panics on zstd-compressed responses (it passes a nil option to
+	// zstd.NewReader), which Brimble's edge sends.
+	sockOpts.SetTransports(types.NewSet(eio.WebSocket))
 	sockOpts.SetReconnection(false)
 	sockOpts.SetTimeout(10 * time.Second)
 	sockOpts.SetAutoConnect(true)
@@ -91,24 +102,36 @@ func StreamLogs(ctx context.Context, opts StreamLogsOpts) error {
 		if opts.Query != "" {
 			params["query"] = opts.Query
 		}
+		debug("connected; emitting tail %v", params)
 		s.Emit("tail", params)
 	}
 	// Core emits "connected" once its upstream Loki tail is open; the tail
 	// request itself goes out on the socket "connect" event.
 	s.On("connect", emitTail)
-	s.On("disconnected", func(...any) {
+	var ready sync.Once
+	s.On("connected", func(...any) {
+		debug("server opened the Loki tail")
+		if opts.OnReady != nil {
+			ready.Do(opts.OnReady)
+		}
+	})
+	s.On("disconnected", func(args ...any) {
+		debug("server closed the Loki tail: %v", args)
 		fail(errors.New("log stream closed by the server"))
 	})
 	s.On("logs", func(args ...any) {
 		if len(args) == 0 {
 			return
 		}
-		for _, line := range parseLokiPayload(args[0]) {
+		lines := parseLokiPayload(args[0])
+		debug("logs event: %d lines (payload %T)", len(lines), args[0])
+		for _, line := range lines {
 			opts.OnLine(line)
 		}
 	})
 
 	s.On("error", func(args ...any) {
+		debug("error event: %v", args)
 		msg := extractSocketMessage(args)
 		if msg == "" {
 			msg = "log stream error"
@@ -119,6 +142,7 @@ func StreamLogs(ctx context.Context, opts StreamLogsOpts) error {
 	})
 
 	s.On("connect_error", func(args ...any) {
+		debug("connect_error: %v", args)
 		msg := extractSocketMessage(args)
 		if msg == "" {
 			msg = "connection refused"
@@ -127,6 +151,7 @@ func StreamLogs(ctx context.Context, opts StreamLogsOpts) error {
 	})
 
 	s.On("disconnect", func(args ...any) {
+		debug("disconnect: %v", args)
 		msg := extractSocketMessage(args)
 		// Only our own Close() is a clean end; anything else lost the stream.
 		if msg == "io client disconnect" {

@@ -137,3 +137,31 @@ func LoginForm(apiKey *string) error {
 		),
 	).WithTheme(compactTheme()).Run()
 }
+
+func MultiSelect(title, description string, options []Option, selected []string) ([]string, error) {
+	if len(options) == 0 {
+		return nil, fmt.Errorf("nothing to select")
+	}
+	if !IsInteractive() {
+		return nil, fmt.Errorf("not a terminal; pass the choices explicitly")
+	}
+	pre := map[string]bool{}
+	for _, v := range selected {
+		pre[v] = true
+	}
+	opts := make([]huh.Option[string], 0, len(options))
+	for _, o := range options {
+		opts = append(opts, huh.NewOption(o.Label, o.Value).Selected(pre[o.Value]))
+	}
+	var values []string
+	field := huh.NewMultiSelect[string]().
+		Title(title).
+		Options(opts...).
+		Value(&values).
+		Height(min(14, len(options)+3))
+	if description != "" {
+		field = field.Description(description)
+	}
+	err := field.WithTheme(compactTheme()).Run()
+	return values, err
+}

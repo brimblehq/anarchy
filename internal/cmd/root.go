@@ -2,19 +2,17 @@ package cmd
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"time"
 
-	"github.com/brimbleapp/brimble-cli/internal/auth"
-	"github.com/brimbleapp/brimble-cli/internal/client"
-	"github.com/brimbleapp/brimble-cli/internal/config"
-	"github.com/brimbleapp/brimble-cli/internal/output"
-	"github.com/brimbleapp/brimble-cli/internal/ui"
+	"github.com/brimblehq/anarchy/internal/auth"
+	"github.com/brimblehq/anarchy/internal/client"
+	"github.com/brimblehq/anarchy/internal/config"
+	"github.com/brimblehq/anarchy/internal/output"
+	"github.com/brimblehq/anarchy/internal/ui"
 	"github.com/charmbracelet/huh"
 	"github.com/spf13/cobra"
 )
@@ -104,14 +102,14 @@ Inside a linked directory, commands default to the linked project, so
 
 	add(groupStart,
 		newLoginCmd(), newLogoutCmd(), newWhoamiCmd(),
-		newLinkCmd(), newUnlinkCmd(),
+		newLinkCmd(), newUnlinkCmd(), newMCPCmd(),
 	)
 	add(groupDeploy,
 		newDeployCmd(), newStatusCmd(), newOpenCmd(), newLogCmd(),
 	)
 	add(groupManage,
-		newProjectCmd(), newEnvCmd(), newDomainCmd(), newEnvironmentCmd(),
-		newTeamCmd(), newMetaCmd(), newAuthCmd(),
+		newProjectCmd(), newConfigCmd(), newEnvCmd(), newDomainCmd(), newEnvironmentCmd(),
+		newTeamCmd(), newMetaCmd(), newAuthCmd(), newUpgradeCmd(),
 	)
 	root.SetHelpCommandGroupID(groupManage)
 	root.SetCompletionCommandGroupID(groupManage)
@@ -129,7 +127,9 @@ func isLocalCommand(cmd *cobra.Command) bool {
 	switch {
 	case parent == "auth" && (name == "login" || name == "logout"):
 		return true
-	case parent == "brimble" && (name == "login" || name == "logout" || name == "unlink"):
+	case parent == "brimble" && (name == "login" || name == "logout" || name == "unlink" || name == "mcp" || name == "upgrade"):
+		return true
+	case parent == "mcp":
 		return true
 	case name == "help" || name == "brimble" || name == "completion" || parent == "completion":
 		return true
@@ -246,23 +246,6 @@ func friendlyError(err error) error {
 	return err
 }
 
-func readJSONFile(path string) (json.RawMessage, error) {
-	var b []byte
-	var err error
-	if path == "-" {
-		b, err = io.ReadAll(os.Stdin)
-	} else {
-		b, err = os.ReadFile(path)
-	}
-	if err != nil {
-		return nil, err
-	}
-	if !json.Valid(b) {
-		return nil, fmt.Errorf("parse json: invalid JSON")
-	}
-	return json.RawMessage(b), nil
-}
-
 // confirmOrAbort asks before an action. It returns false when the user
 // declines; without a TTY it requires --yes for destructive actions.
 func confirmOrAbort(yes bool, prompt string, destructive bool) (bool, error) {
@@ -284,3 +267,13 @@ func confirmOrAbort(yes bool, prompt string, destructive bool) (bool, error) {
 	}
 	return ok, nil
 }
+
+// debugf prints a trace line to stderr when BRIMBLE_DEBUG is set; nil otherwise.
+var debugf = func() func(string, ...any) {
+	if os.Getenv("BRIMBLE_DEBUG") == "" {
+		return nil
+	}
+	return func(format string, args ...any) {
+		fmt.Fprintf(os.Stderr, "[debug] "+format+"\n", args...)
+	}
+}()

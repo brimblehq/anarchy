@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/brimbleapp/brimble-cli/internal/auth"
+	"github.com/brimblehq/anarchy/internal/auth"
 )
 
 type Auth struct {

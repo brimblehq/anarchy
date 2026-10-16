@@ -3,7 +3,7 @@ package main
 import (
 	"os"
 
-	"github.com/brimbleapp/brimble-cli/internal/cmd"
+	"github.com/brimblehq/anarchy/internal/cmd"
 )
 
 func main() {

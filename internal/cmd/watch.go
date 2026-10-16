@@ -8,7 +8,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/brimbleapp/brimble-cli/internal/ui"
+	"github.com/brimblehq/anarchy/internal/ui"
 	"github.com/spf13/cobra"
 )
 

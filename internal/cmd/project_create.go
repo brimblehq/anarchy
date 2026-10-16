@@ -7,12 +7,13 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 
-	"github.com/brimbleapp/brimble-cli/internal/client"
-	"github.com/brimbleapp/brimble-cli/internal/ui"
+	"github.com/brimblehq/anarchy/internal/client"
+	"github.com/brimblehq/anarchy/internal/ui"
 )
 
 type createDraft struct {
@@ -53,11 +54,13 @@ type createOptions struct {
 	noLogs    bool
 }
 
-// runCreate creates a project from body (a Core JSON payload) or, when body
-// is nil, from the interactive questionnaire, then follows the first deploy.
-func runCreate(ctx context.Context, body json.RawMessage, opts createOptions) error {
-	var draft *createDraft
-	if len(body) == 0 {
+// runCreate creates a project from draft (built from flags) or, when draft is
+// nil, from the interactive questionnaire, then follows the first deploy.
+// Build and runtime settings belong in brimble.toml, which Core applies on
+// each deploy.
+func runCreate(ctx context.Context, draft *createDraft, opts createOptions) error {
+	interactive := draft == nil
+	if interactive {
 		d, err := runCreateQuestionnaire(ctx, cfg.TeamID)
 		if err != nil {
 			return err
@@ -67,7 +70,7 @@ func runCreate(ctx context.Context, body json.RawMessage, opts createOptions) er
 
 	var ref ProjectRef
 	var logID string
-	if draft != nil && draft.Source == sourceUpload {
+	if draft.Source == sourceUpload {
 		var err error
 		logID, err = uploadDrop(ctx, client.DropOpts{Name: draft.Name, TeamID: cfg.TeamID}, draft.UploadDir, draft.Name)
 		if err != nil {
@@ -78,16 +81,12 @@ func runCreate(ctx context.Context, body json.RawMessage, opts createOptions) er
 			return err
 		}
 	} else {
-		payload := body
-		if draft != nil {
-			var err error
-			payload, err = json.Marshal(draft.toPayload())
-			if err != nil {
-				return err
-			}
+		payload, err := json.Marshal(draft.toPayload())
+		if err != nil {
+			return err
 		}
 		var created client.CreateResult
-		err := ui.WithSpinner("Creating project…", func() error {
+		err = ui.WithSpinner("Creating project…", func() error {
 			var err error
 			created, err = coreClient.CreateProject(ctx, payload, cfg.TeamID)
 			return err
@@ -98,22 +97,12 @@ func runCreate(ctx context.Context, body json.RawMessage, opts createOptions) er
 		if jsonOutput() {
 			return printResult(created)
 		}
-		ref = ProjectRef{ID: created.ID, Name: created.Name, Project: created.Project}
-		if ref.Name == "" && draft != nil {
-			ref.Name = draft.Name
-		}
-		if ref.Name == "" {
-			var named struct {
-				Name string `json:"name"`
-			}
-			_ = json.Unmarshal(body, &named)
-			ref.Name = named.Name
-		}
+		ref = ProjectRef{ID: created.ID, Name: cmp.Or(created.Name, draft.Name), Project: created.Project}
 		logID = created.LogID
 	}
 
 	ui.Success("Created %s", ref.Display())
-	if opts.offerLink || draft != nil {
+	if opts.offerLink || interactive {
 		offerLink(ref)
 	}
 	if logID == "" {
@@ -123,9 +112,135 @@ func runCreate(ctx context.Context, body json.RawMessage, opts createOptions) er
 	return afterDeployStarted(ctx, ref, logID, opts.detach, !opts.noLogs)
 }
 
+// createFlags is the non-interactive way to create a project.
+type createFlags struct {
+	name, repo, git, branch, image, dir, serviceType, region string
+	noDeploy                                                 bool
+}
+
+func (f createFlags) given() bool { return f.repo != "" || f.image != "" || f.dir != "" }
+
+// draftFromFlags builds a create request from flags, looking up what the API
+// needs (the repo's installation, the region ID).
+func draftFromFlags(ctx context.Context, f createFlags) (*createDraft, error) {
+	sources := 0
+	for _, v := range []string{f.repo, f.image, f.dir} {
+		if v != "" {
+			sources++
+		}
+	}
+	if sources != 1 {
+		return nil, fmt.Errorf("pass exactly one of --repo, --image or --dir")
+	}
+	name := f.name
+	if name == "" {
+		switch {
+		case f.repo != "":
+			name = lastPathPart(f.repo)
+		case f.image != "":
+			name = lastPathPart(strings.SplitN(f.image, ":", 2)[0])
+		default:
+			if abs, err := filepath.Abs(f.dir); err == nil {
+				name = lastPathPart(abs)
+			}
+		}
+	}
+	name = slugifyName(name)
+	if len(name) < 3 {
+		return nil, fmt.Errorf("project name must be at least 3 characters — pass --name")
+	}
+
+	d := &createDraft{Name: name, CPU: 0.5, Memory: 0.5, Deploy: !f.noDeploy, TeamID: cfg.TeamID,
+		ServiceType: cmp.Or(f.serviceType, "web-service")}
+	switch d.ServiceType {
+	case "web-service", "static", "worker", "mcp":
+	default:
+		return nil, fmt.Errorf("--type must be web-service, static, worker or mcp")
+	}
+
+	switch {
+	case f.dir != "":
+		if st, err := os.Stat(f.dir); err != nil || !st.IsDir() {
+			return nil, fmt.Errorf("%s is not a folder", f.dir)
+		}
+		d.Source, d.ServiceType, d.UploadDir = sourceUpload, "static", f.dir
+		return d, nil
+	case f.image != "":
+		d.Source, d.Framework, d.RepoName = "docker", "docker", f.image
+		d.RepoBranch = "latest"
+		if i := strings.LastIndex(f.image, ":"); i > 0 && !strings.Contains(f.image[i:], "/") {
+			d.RepoBranch = f.image[i+1:]
+		}
+	default:
+		d.Source = strings.ToLower(cmp.Or(f.git, "github"))
+		repo, installationID, err := findRepo(ctx, d.Source, f.repo)
+		if err != nil {
+			return nil, err
+		}
+		d.RepoName, d.RepoBranch, d.InstallationID = repo.FullName, cmp.Or(f.branch, repo.Branch, "main"), installationID
+		if repo.Framework != nil {
+			d.Framework = repo.Framework.Slug
+		}
+	}
+
+	regions, defaultRegion, err := loadRegionOptions(ctx)
+	if err != nil {
+		return nil, err
+	}
+	d.RegionID = defaultRegion
+	if f.region != "" {
+		d.RegionID = ""
+		for _, r := range regions {
+			if r.Value == f.region || strings.HasPrefix(r.Label, f.region+" ") || r.Label == f.region {
+				d.RegionID = r.Value
+				break
+			}
+		}
+		if d.RegionID == "" {
+			return nil, fmt.Errorf("region %q isn't available on your plan — see `brimble meta regions`", f.region)
+		}
+	}
+	return d, nil
+}
+
+// findRepo finds owner/name among the connected git accounts and returns it
+// with the installation that grants access.
+func findRepo(ctx context.Context, source, fullName string) (client.GitRepo, int, error) {
+	if !strings.Contains(fullName, "/") {
+		return client.GitRepo{}, 0, fmt.Errorf("--repo must be owner/name, e.g. acme/web")
+	}
+	accounts, err := loadGitAccounts(ctx, source, cfg.TeamID)
+	if err != nil {
+		return client.GitRepo{}, 0, err
+	}
+	if len(accounts) == 0 {
+		return client.GitRepo{}, 0, fmt.Errorf("%s is not connected to Brimble — connect it at https://app.brimble.io", gitLabel(source))
+	}
+	search := lastPathPart(fullName)
+	for _, a := range accounts {
+		repos, err := loadGitRepos(ctx, source, a.InstallationID, search, cfg.TeamID)
+		if err != nil {
+			continue
+		}
+		for _, r := range repos {
+			if strings.EqualFold(r.FullName, fullName) {
+				return r, cmp.Or(r.InstallationID, a.InstallationID), nil
+			}
+		}
+	}
+	return client.GitRepo{}, 0, fmt.Errorf("%s not found in your connected %s accounts", fullName, gitLabel(source))
+}
+
+// hasBrimbleToml reports a brimble.toml in the current folder; its build
+// settings then come from the file on each deploy.
+func hasBrimbleToml() bool {
+	_, err := os.Stat(configFileName)
+	return err == nil
+}
+
 func runCreateQuestionnaire(ctx context.Context, teamID string) (*createDraft, error) {
 	if !ui.IsInteractive() {
-		return nil, fmt.Errorf("not a terminal; pass --file with a JSON body")
+		return nil, fmt.Errorf("not a terminal; pass --repo, --image or --dir (see `brimble project create --help`)")
 	}
 
 	ui.Title("Create project")
@@ -342,6 +457,10 @@ func fillGitDraft(ctx context.Context, d *createDraft) error {
 	d.Framework = fw.Slug
 
 	if isNoBuildFramework(d.Framework) {
+		return nil
+	}
+	if hasBrimbleToml() {
+		ui.Info("Found brimble.toml — build and start settings come from it on each deploy")
 		return nil
 	}
 

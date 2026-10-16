@@ -8,9 +8,10 @@ import (
 	"reflect"
 	"sort"
 	"testing"
+	"time"
 
-	"github.com/brimbleapp/brimble-cli/internal/client"
-	"github.com/brimbleapp/brimble-cli/internal/config"
+	"github.com/brimblehq/anarchy/internal/client"
+	"github.com/brimblehq/anarchy/internal/config"
 )
 
 func TestDotenvRoundTrip(t *testing.T) {
@@ -193,6 +194,17 @@ func TestSlugifyName(t *testing.T) {
 	for in, want := range cases {
 		if got := slugifyName(in); got != want {
 			t.Errorf("slugifyName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestFormatSince(t *testing.T) {
+	cases := map[time.Duration]string{
+		15 * time.Minute: "15m", 2 * time.Hour: "2h", 90 * time.Minute: "1h30m", 30 * time.Second: "30s",
+	}
+	for in, want := range cases {
+		if got := formatSince(in); got != want {
+			t.Errorf("formatSince(%v) = %q, want %q", in, got, want)
 		}
 	}
 }

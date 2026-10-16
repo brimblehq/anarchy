@@ -15,12 +15,13 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
-	"github.com/brimbleapp/brimble-cli/internal/client"
-	"github.com/brimbleapp/brimble-cli/internal/config"
-	"github.com/brimbleapp/brimble-cli/internal/ui"
+	"github.com/brimblehq/anarchy/internal/client"
+	"github.com/brimblehq/anarchy/internal/config"
+	"github.com/brimblehq/anarchy/internal/ui"
 	"github.com/spf13/cobra"
 )
 
@@ -197,7 +198,7 @@ func afterDeployStarted(ctx context.Context, ref ProjectRef, logID string, detac
 		ui.Hint("Follow it with `brimble logs list %s --watch`", ref.Name)
 		return nil
 	}
-	return followDeploy(ctx, ref, logID, showLogs)
+	return followDeploy(ctx, ref, logID, showLogs, true)
 }
 
 // Deployment status semantics (PROJECT_STATUS in Core).
@@ -218,58 +219,160 @@ func deployFinished(status string) bool {
 
 const followInterval = 2 * time.Second
 
-// followDeploy polls a deployment until it finishes, printing new build log
-// lines as they arrive.
-func followDeploy(ctx context.Context, ref ProjectRef, logID string, showLogs bool) error {
+// startedHere is false when attaching to a deploy started elsewhere (no elapsed time).
+func followDeploy(ctx context.Context, ref ProjectRef, logID string, showLogs, startedHere bool) error {
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	started := time.Now()
 	ui.Info("Following deployment %s of %s  %s", shortID(logID), ref.Display(), ui.Dim("(Ctrl+C to stop following)"))
 
-	var printed int
-	var status string
-	var failures int
-	for {
-		current, err := deploymentStatus(ctx, ref.ID, logID)
-		switch {
-		case ctx.Err() != nil:
-		case err != nil:
-			failures++
-			if failures == 5 {
-				ui.Warn("Still unable to read deployment status: %s", err)
+	tail := &lineTail{n: 20}
+	seen := map[string]bool{} // lines already printed, across reconnects
+	onLine := func(l client.BuildLogLine) {
+		if l.ID != "" {
+			if seen[l.ID] {
+				return
 			}
-		default:
-			failures = 0
-			if current != "" && current != status {
-				status = current
-				if !deployFinished(status) {
-					ui.Info("%s", ui.Status(status))
-				}
-			}
+			seen[l.ID] = true
 		}
-
-		if showLogs && ctx.Err() == nil {
-			printed = printNewLogLines(ctx, ref.ID, logID, printed, deployFinished(status))
-		}
-
-		if deployFinished(status) {
-			break
-		}
-		select {
-		case <-ctx.Done():
-			fmt.Fprintln(os.Stderr)
-			ui.Info("Stopped following — the deployment continues on Brimble")
-			ui.Hint("Check it with `brimble logs list %s`", ref.Name)
-			return nil
-		case <-time.After(followInterval):
+		tail.add(l.Content)
+		if showLogs {
+			fmt.Fprintf(os.Stdout, "%s %s\n", ui.Dim("│"), l.Content)
 		}
 	}
 
-	elapsed := time.Since(started).Round(time.Second)
+	for {
+		status, awaiting, err := streamUntilApproval(ctx, ref, logID, showLogs, onLine)
+		if ctx.Err() != nil {
+			fmt.Fprintln(os.Stderr)
+			ui.Info("Stopped following — the deployment continues on Brimble")
+			ui.Hint("Follow it again with `brimble logs build %s %s`", ref.Name, logID)
+			return nil
+		}
+		if awaiting {
+			resume, err := handleConfigApproval(ctx, ref)
+			if err != nil || !resume {
+				return err
+			}
+			continue
+		}
+		if client.IsStreamUnavailable(err) {
+			ui.Warn("Live build logs are unavailable right now — checking the deployment status instead")
+			status, err = pollDeploy(ctx, ref, logID, showLogs)
+			tail = nil
+		}
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return err
+		}
+		if status == "AWAITING_CONFIG_APPROVAL" {
+			resume, err := handleConfigApproval(ctx, ref)
+			if err != nil || !resume {
+				return err
+			}
+			continue
+		}
+		var elapsed time.Duration
+		if startedHere {
+			elapsed = time.Since(started)
+		}
+		return reportDeploy(ctx, ref, logID, status, elapsed, showLogs, tail)
+	}
+}
+
+const approvalCheckInterval = 5 * time.Second
+
+// streamUntilApproval streams build logs until the deploy finishes, or stops
+// early (awaiting=true) when it pauses for brimble.toml approval — the server
+// keeps the stream open while it waits, so we watch the status alongside.
+func streamUntilApproval(ctx context.Context, ref ProjectRef, logID string, showLogs bool, onLine func(client.BuildLogLine)) (status string, awaiting bool, err error) {
+	streamCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	var paused atomic.Bool
+	go func() {
+		t := time.NewTicker(approvalCheckInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-streamCtx.Done():
+				return
+			case <-t.C:
+				if st, err := deploymentStatus(streamCtx, ref.ID, logID); err == nil && st == "AWAITING_CONFIG_APPROVAL" {
+					paused.Store(true)
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+
+	run := func() error {
+		var serr error
+		status, serr = coreClient.StreamBuildLogs(streamCtx, ref.ID, logID, cfg.TeamID, onLine)
+		return serr
+	}
+	if showLogs {
+		err = run()
+	} else {
+		err = ui.WithSpinner("Building "+ref.Display()+"…", run)
+	}
+	if paused.Load() && ctx.Err() == nil {
+		return "", true, nil
+	}
+	return status, false, err
+}
+
+// handleConfigApproval shows the brimble.toml plan a deploy is waiting on and
+// lets the user decide. resume reports whether to keep following the deploy.
+func handleConfigApproval(ctx context.Context, ref ProjectRef) (resume bool, err error) {
+	fmt.Fprintln(os.Stderr)
+	ui.Warn("This deploy is waiting for approval of brimble.toml changes")
+	plan, err := latestConfigPlan(ctx, ref)
+	if err != nil {
+		return false, err
+	}
+	if plan == nil || plan.Status != "awaiting_approval" {
+		ui.Hint("Review it in the dashboard under Configuration → Config as code")
+		return false, nil
+	}
+	printConfigPlan(ref, *plan)
+	if !ui.IsInteractive() {
+		ui.Hint("Approve with `brimble config approve %s` (the deploy then resumes), or reject with `brimble config reject %s`", ref.Name, ref.Name)
+		return false, nil
+	}
+	choice, err := ui.Select("What do you want to do?", []ui.Option{
+		{Label: "Approve and apply — the deploy continues", Value: "approve"},
+		{Label: "Reject — the deploy is cancelled", Value: "reject"},
+		{Label: "Decide later", Value: "later"},
+	})
+	if err != nil {
+		return false, err
+	}
+	switch choice {
+	case "approve":
+		if err := decideConfigPlan(ctx, ref, *plan, "approve"); err != nil {
+			return false, err
+		}
+		return true, nil
+	case "reject":
+		return false, decideConfigPlan(ctx, ref, *plan, "reject")
+	}
+	ui.Hint("The deploy keeps waiting. Approve later with `brimble config approve %s`.", ref.Name)
+	return false, nil
+}
+
+func reportDeploy(ctx context.Context, ref ProjectRef, logID, status string, elapsed time.Duration, showLogs bool, tail *lineTail) error {
 	switch {
 	case deploySucceeded(status):
-		ui.Success("Deployed %s in %s", ref.Display(), elapsed)
+		if elapsed > 0 {
+			ui.Success("Deployed %s in %s", ref.Display(), elapsed.Round(time.Second))
+		} else {
+			ui.Success("%s is deployed", ref.Display())
+		}
 		if domain := projectDomain(ctx, ref.ID); domain != "" {
 			fmt.Fprintf(os.Stdout, "  %s\n", ui.Code(domain))
 		}
@@ -287,14 +390,76 @@ func followDeploy(ctx context.Context, ref ProjectRef, logID string, showLogs bo
 		return fmt.Errorf("%s deployed but is failing health checks — see `brimble logs %s`", ref.Display(), ref.Name)
 	default:
 		if !showLogs {
-			printLogTail(ctx, ref.ID, logID, 20)
+			if tail != nil {
+				tail.print()
+			} else {
+				printLogTail(ctx, ref.ID, logID, 20)
+			}
 		}
 		return fmt.Errorf("deployment %s — full log: `brimble logs download %s %s`",
 			strings.ToLower(ui.StatusText(status)), ref.Name, logID)
 	}
 }
 
-// printLogTail prints the last n lines of a deployment's build log.
+type lineTail struct {
+	n     int
+	lines []string
+}
+
+func (t *lineTail) add(line string) {
+	t.lines = append(t.lines, line)
+	if len(t.lines) > t.n {
+		t.lines = t.lines[len(t.lines)-t.n:]
+	}
+}
+
+func (t *lineTail) print() {
+	if len(t.lines) == 0 {
+		return
+	}
+	fmt.Fprintln(os.Stderr, ui.Dim("  Last lines of the build log:"))
+	for _, l := range t.lines {
+		fmt.Fprintf(os.Stderr, "%s %s\n", ui.Dim("│"), l)
+	}
+}
+
+func pollDeploy(ctx context.Context, ref ProjectRef, logID string, showLogs bool) (string, error) {
+	var printed int
+	var status string
+	var failures int
+	for {
+		current, err := deploymentStatus(ctx, ref.ID, logID)
+		switch {
+		case ctx.Err() != nil:
+			return "", ctx.Err()
+		case err != nil:
+			failures++
+			if failures == 5 {
+				ui.Warn("Still unable to read deployment status: %s", err)
+			}
+		default:
+			failures = 0
+			if current != "" && current != status {
+				status = current
+				if !deployFinished(status) {
+					ui.Info("%s", ui.Status(status))
+				}
+			}
+		}
+		if showLogs {
+			printed = printNewLogLines(ctx, ref.ID, logID, printed, deployFinished(status))
+		}
+		if deployFinished(status) {
+			return status, nil
+		}
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(followInterval):
+		}
+	}
+}
+
 func printLogTail(ctx context.Context, projectID, logID string, n int) {
 	body, err := coreClient.DownloadLog(ctx, projectID, logID, cfg.TeamID)
 	if err != nil {
