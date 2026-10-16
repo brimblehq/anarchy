@@ -231,7 +231,8 @@ func newDomainRemoveCmd() *cobra.Command {
 func newDomainStatusCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "status <domain>",
-		Short: "Check a domain's DNS and certificate status",
+		Short: "Check a domain's DNS setup",
+		Long:  "Check whether a domain's DNS points at Brimble, and show the records to create if it doesn't yet.",
 		Args:  cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			run(func(ctx context.Context) error {
@@ -248,11 +249,84 @@ func newDomainStatusCmd() *cobra.Command {
 				if jsonOutput() {
 					return printResult(data)
 				}
-				ui.Title(name)
-				return printResult(data)
+				var st domainStatus
+				if err := json.Unmarshal(data, &st); err != nil {
+					return printResult(data)
+				}
+				printDomainStatus(name, st)
+				return nil
 			})
 		},
 	}
+}
+
+// domainStatus is GET /v1/domains/{domain}/status.
+type domainStatus struct {
+	Active  bool `json:"active"`
+	Primary bool `json:"primary"`
+	Project struct {
+		Name string `json:"name"`
+	} `json:"project"`
+	Records []struct {
+		Type          string `json:"type"`
+		Name          string `json:"name"`
+		Value         string `json:"value"`
+		IsRecommended bool   `json:"isRecommended"`
+	} `json:"records"`
+	Nameserver struct {
+		Expected []string `json:"expected"`
+		Actual   []string `json:"actual"`
+	} `json:"nameserver"`
+	Redirect struct {
+		URL string `json:"url"`
+	} `json:"redirect"`
+}
+
+func printDomainStatus(name string, st domainStatus) {
+	ui.Title(name)
+	if st.Active {
+		printKV("Status", ui.Status("ACTIVE")+ui.Dim("  DNS points at Brimble"))
+	} else {
+		printKV("Status", ui.Yellow("● Pending DNS"))
+	}
+	printKV("Project", st.Project.Name)
+	if st.Primary {
+		printKV("Primary", "yes")
+	}
+	printKV("Redirects to", st.Redirect.URL)
+
+	if len(st.Records) > 0 {
+		title := "DNS record"
+		if !st.Active {
+			title = "Add this record at your DNS provider"
+		}
+		ui.Section(title)
+		rows := make([][]string, 0, len(st.Records))
+		for _, r := range st.Records {
+			rows = append(rows, []string{r.Type, r.Name, r.Value})
+		}
+		ui.Table([]string{"TYPE", "NAME", "VALUE"}, rows)
+	}
+
+	// Root domains can instead move to Brimble's nameservers.
+	if isRootDomain(name) && len(st.Nameserver.Expected) > 0 {
+		ui.Section("Or use Brimble's nameservers")
+		printKV("Brimble", strings.Join(st.Nameserver.Expected, ", "))
+		current := strings.Join(st.Nameserver.Actual, ", ")
+		if current == "" {
+			current = ui.Dim("none found")
+		}
+		printKV("Current", current)
+	}
+
+	fmt.Fprintln(os.Stdout)
+	if !st.Active {
+		ui.Hint("DNS changes can take a few minutes to an hour. Run `brimble domain status %s` again to check.", name)
+	}
+}
+
+func isRootDomain(name string) bool {
+	return strings.Count(name, ".") == 1
 }
 
 func normalizeDomain(s string) string {
