@@ -65,6 +65,89 @@ func printProjectStats(project string, stats client.ProjectStats) error {
 	return nil
 }
 
+func printDatabaseInsights(project string, in client.DatabaseInsights) error {
+	if project == "" {
+		project = "database"
+	}
+	ui.Title(project + " · stats")
+
+	if !in.Supported {
+		ui.Muted("  Metrics aren't available for this %s database.", cmp.Or(in.EngineName, in.Engine, "type of"))
+		fmt.Fprintln(os.Stdout)
+		return nil
+	}
+	if in.Range.From != "" && in.Range.To != "" {
+		printKV("Window", formatClock(in.Range.From)+" → "+formatClock(in.Range.To))
+		ui.Muted("  ↑/↓ compare with the previous window of the same length.")
+	}
+
+	s := in.Summary
+	ui.Section("Resources")
+	printMetricKV("CPU", s.CPU, formatPercent)
+	printMetricKV("Memory", s.Memory, formatBytes)
+	printMetricKV("Disk", s.Disk, formatPercent)
+	printMetricKV("IOPS", s.IOPS, formatRate)
+
+	ui.Section("Queries")
+	printMetricKV("Ops/sec", s.Throughput, formatRate)
+	printMetricKV("Error rate", scaled(s.ErrorRate, 100), formatPercent)
+	printMetricKV("Connections", s.Connections, formatPlain)
+	if in.HA {
+		printMetricKV("Replica lag", scaled(s.ReplicationLag, 1000), formatDurationMs)
+	}
+
+	if len(in.Members) > 0 {
+		ui.Section("Members")
+		rows := make([][]string, 0, len(in.Members))
+		for _, m := range in.Members {
+			health, lag := "—", "—"
+			if m.Healthy != nil {
+				health = map[bool]string{true: "healthy", false: "unhealthy"}[*m.Healthy]
+			}
+			if m.LagSeconds != nil {
+				lag = formatDurationMs(*m.LagSeconds * 1000)
+			}
+			rows = append(rows, []string{strconv.Itoa(m.Index), m.Role, health, lag})
+		}
+		ui.Table([]string{"#", "ROLE", "HEALTH", "LAG"}, rows)
+	}
+
+	if ops := in.TopOperations; len(ops) > 0 {
+		ui.Section("Top operations")
+		if len(ops) > 5 {
+			ops = ops[:5]
+		}
+		opt := func(v *float64, f func(float64) string) string {
+			if v == nil {
+				return "—"
+			}
+			return f(*v)
+		}
+		rows := make([][]string, 0, len(ops))
+		for _, op := range ops {
+			rows = append(rows, []string{
+				truncate(op.Operation, 60),
+				opt(op.Calls, formatPlain),
+				opt(op.MeanMs, formatDurationMs),
+				opt(op.PercentOfDBTime, formatPercent),
+			})
+		}
+		ui.Table([]string{"OPERATION", "CALLS", "MEAN", "DB TIME"}, rows)
+	}
+
+	fmt.Fprintln(os.Stdout)
+	return nil
+}
+
+// scaled converts a metric's unit; the delta is relative, so it stays.
+func scaled(m client.Metric, by float64) client.Metric {
+	if m.Value != nil {
+		v := *m.Value * by
+		m.Value = &v
+	}
+	return m
+}
+
 func printMetricKV(key string, m client.Metric, format func(float64) string) {
 	if m.Value == nil {
 		return

@@ -733,9 +733,24 @@ func newProjectStatsCmd() *cobra.Command {
 				}
 				fetch := func(ctx context.Context) error {
 					var stats client.ProjectStats
+					var db *client.DatabaseInsights
 					var err error
 					load := func() error {
-						stats, err = coreClient.ProjectStats(ctx, ref.ID, cfg.TeamID)
+						// Core serves database metrics from a separate endpoint; the
+						// project one reports databases as unsupported.
+						isDB := ref.Project != nil && ref.Project.ServiceType == "database"
+						if !isDB {
+							stats, err = coreClient.ProjectStats(ctx, ref.ID, cfg.TeamID)
+							if err != nil {
+								return err
+							}
+							isDB = !stats.Supported && stats.ServiceType == "database"
+						}
+						if isDB {
+							var in client.DatabaseInsights
+							in, err = coreClient.DatabaseInsights(ctx, ref.ID, cfg.TeamID)
+							db = &in
+						}
 						return err
 					}
 					if watch {
@@ -745,6 +760,12 @@ func newProjectStatsCmd() *cobra.Command {
 					}
 					if err != nil {
 						return err
+					}
+					if db != nil {
+						if jsonOutput() {
+							return printResult(*db)
+						}
+						return printDatabaseInsights(ref.Display(), *db)
 					}
 					if jsonOutput() {
 						return printResult(stats)

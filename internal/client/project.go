@@ -138,6 +138,16 @@ func (c *Core) ProjectStats(ctx context.Context, projectID, teamID string) (Proj
 	return data, err
 }
 
+func (c *Core) DatabaseInsights(ctx context.Context, projectID, teamID string) (DatabaseInsights, error) {
+	var data DatabaseInsights
+	_, err := c.http.DoJSON(ctx, Request{
+		Method: http.MethodGet,
+		Path:   "/v1/projects/database/" + url.PathEscape(projectID) + "/insights",
+		TeamID: teamID,
+	}, &data)
+	return data, err
+}
+
 func (c *Core) StartProject(ctx context.Context, projectID, teamID string) (json.RawMessage, error) {
 	return c.projectAction(ctx, projectID, "start", teamID)
 }

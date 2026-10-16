@@ -432,6 +432,47 @@ type WorkerExecution struct {
 	AverageDurationMs Metric `json:"averageDurationMs"`
 }
 
+// DatabaseInsights is a database project's metrics; ProjectStats doesn't
+// cover databases.
+type DatabaseInsights struct {
+	Engine        string           `json:"engine"`
+	EngineName    string           `json:"engineName"`
+	Supported     bool             `json:"supported"`
+	HA            bool             `json:"ha"`
+	Live          bool             `json:"live"`
+	Range         StatsRange       `json:"range"`
+	Summary       InsightsSummary  `json:"summary"`
+	TopOperations []TopOperation   `json:"topOperations"`
+	Members       []DatabaseMember `json:"members"`
+}
+
+type InsightsSummary struct {
+	Throughput     Metric `json:"throughput"`
+	ErrorRate      Metric `json:"errorRate"` // a 0–1 ratio
+	Connections    Metric `json:"connections"`
+	Memory         Metric `json:"memory"` // bytes
+	Disk           Metric `json:"disk"`   // percent of the volume
+	CPU            Metric `json:"cpu"`
+	IOPS           Metric `json:"iops"`
+	ReplicationLag Metric `json:"replicationLag"` // seconds
+}
+
+type TopOperation struct {
+	Operation        string   `json:"operation"`
+	Calls            *float64 `json:"calls"`
+	TotalTimeSeconds *float64 `json:"totalTimeSeconds"`
+	MeanMs           *float64 `json:"meanMs"`
+	PercentOfDBTime  *float64 `json:"percentOfDbTime"`
+}
+
+type DatabaseMember struct {
+	Index      int      `json:"index"`
+	Role       string   `json:"role"`
+	Host       string   `json:"host"`
+	Healthy    *bool    `json:"healthy"`
+	LagSeconds *float64 `json:"lagSeconds"`
+}
+
 // Metric is a stats point. Value is nil when the API omitted it.
 type Metric struct {
 	Value *float64 `json:"value"`
