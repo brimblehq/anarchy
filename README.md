@@ -14,10 +14,10 @@ Install script (macOS, Linux) — downloads the latest release, verifies its
 checksum and installs to `/usr/local/bin` (or `~/.local/bin`):
 
 ```bash
-curl -fsSL <INSTALL_SCRIPT_URL> | sh
+curl -fsSL https://brimble-cli.t3.tigrisfiles.io/install.sh | sh
 
 # pin a version or choose the directory
-curl -fsSL <INSTALL_SCRIPT_URL> | BRIMBLE_VERSION=v0.2.0 BRIMBLE_INSTALL_DIR=~/bin sh
+curl -fsSL https://brimble-cli.t3.tigrisfiles.io/install.sh | BRIMBLE_VERSION=v0.1.0 BRIMBLE_INSTALL_DIR=~/bin sh
 ```
 
 Every GitHub release also carries the script, so this works before the S3 URL
@@ -105,58 +105,17 @@ Team: `--team` → `BRIMBLE_TEAM_ID` → linked project's team → `team switch`
 
 ## Commands
 
-```bash
-# Deploy & observe
-brimble deploy [project]           # --detach, --no-logs, --restart, --dir ./dist (static uploads)
-brimble status [project]           # details + recent deployments
-brimble open [project]             # open the live URL
-brimble logs [project]             # live logs; -q error --since 1h
-brimble logs build [project] [id]  # stream a deployment's build logs live (latest running one by default)
-brimble logs list                  # deployment history (--status FAILED, --watch)
-brimble logs download [project] [deploymentId]
-brimble logs requests              # HTTP requests; --status 500 --method POST
-brimble logs search -q "fix login"
+Run `brimble --help`, or `brimble <command> --help`, for every command and flag. The full guide is in the docs:
 
-# Projects
-brimble project list               # --type, --status, --environment, --watch
-brimble project get [project]
-brimble project create             # interactive, or --repo acme/web / --image nginx:1.27 / --dir ./dist
-brimble project redeploy | rollback | restart | cancel [project]
-brimble project start | stop [project]
-brimble project maintenance [project] on|off
-brimble project password [project] on|off
-brimble project previews [project] on|off
-brimble project transfer [project] --to <team>
-brimble project connect-repo | disconnect-repo [project]
-brimble project stats [project]    # CPU, memory, traffic, latency
-brimble project delete [project]   # asks you to type the name; --delete-volume
-
-# Config as code (brimble.toml)
-brimble config pull                # write brimble.toml from the project's current settings
-brimble config validate            # check the file before committing
-brimble config plan                # preview what it would change; optionally apply
-brimble config approve | reject    # act on changes a paused deploy is waiting on
-
-# Environment variables
-brimble env list [--reveal]
-brimble env set API_URL=https://... DEBUG=false
-brimble env set STRIPE_KEY         # bare KEY prompts with hidden input
-brimble env delete OLD_TOKEN
-brimble env pull -f .env           # decrypt into a file (0600)
-brimble env push -f .env.production
-# -e preview targets preview deployments
-
-# Domains, environments, teams
-brimble domain list | add <domain> | remove <domain> | status <domain>
-brimble environment list | create <name> | delete <name> --move-to <name> | default <name>
-brimble team list | members | invite <email>... | remove <email>
-
-brimble meta regions | plans | frameworks
-```
-
-Add `-o json` to any command for machine-readable output; status messages go
-to stderr so stdout stays parseable. Destructive actions confirm first; pass
-`-y` to skip (required in non-interactive shells).
+- [Overview](https://paper.brimble.io/cli/overview): install, log in, link a directory
+- [Deploy](https://paper.brimble.io/cli/deploy)
+- [Projects](https://paper.brimble.io/cli/projects)
+- [Config as code](https://paper.brimble.io/cli/config)
+- [Logs](https://paper.brimble.io/cli/logs)
+- [Environment variables](https://paper.brimble.io/cli/environment-variables)
+- [Domains and teams](https://paper.brimble.io/cli/domains-and-teams)
+- [Coding agents (MCP)](https://paper.brimble.io/cli/agents)
+- [CI](https://paper.brimble.io/cli/ci)
 
 ## CI
 
