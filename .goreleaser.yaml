@@ -46,9 +46,6 @@ archives:
 checksum:
   name_template: checksums.txt
 
-# Homebrew cask in the tap repo: brew install brimblehq/tap/brimble
-# Pushed over SSH with the tap's deploy key (HOMEBREW_TAP_DEPLOY_KEY);
-# without it the cask is generated but not pushed.
 homebrew_casks:
   - name: brimble
     binaries: [brimble]
@@ -57,11 +54,11 @@ homebrew_casks:
     repository:
       owner: brimblehq
       name: homebrew-tap
+      branch: main
       git:
         url: git@github.com:brimblehq/homebrew-tap.git
-        private_key: '{{ envOrDefault "HOMEBREW_TAP_DEPLOY_KEY" "" }}'
-    # Skip the tap push (but still build the cask) until the key is set.
-    skip_upload: '{{ if eq (envOrDefault "HOMEBREW_TAP_DEPLOY_KEY" "") "" }}true{{ end }}'
+        private_key: '{{ envOrDefault "HOMEBREW_TAP_KEY_PATH" "" }}'
+    skip_upload: '{{ if eq (envOrDefault "HOMEBREW_TAP_KEY_PATH" "") "" }}true{{ end }}'
     directory: Casks
     commit_author:
       name: brimble-bot

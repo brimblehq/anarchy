@@ -1,15 +1,5 @@
 name: Release
 
-# Tag to release:  git tag v0.2.0 && git push origin v0.2.0
-#
-# Repository settings (Settings → Secrets and variables → Actions):
-#   secrets.HOMEBREW_TAP_DEPLOY_KEY    Private SSH key; its public half is a
-#                                      write deploy key on brimblehq/homebrew-tap.
-#   secrets.AWS_ACCESS_KEY_ID          Tigris access key (tid_…).
-#   secrets.AWS_SECRET_ACCESS_KEY      Tigris secret key (tsec_…).
-#   vars.INSTALL_BUCKET                Public Tigris bucket for install.sh.
-# Any step whose settings are missing is skipped.
-
 on:
   push:
     tags:
@@ -34,6 +24,31 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # GoReleaser treats an unparseable private_key as a path, so check it first.
+      - name: Check Homebrew tap deploy key
+        env:
+          DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+        run: |
+          if [ -z "$DEPLOY_KEY" ]; then
+            echo "HOMEBREW_TAP_DEPLOY_KEY is not set; the Homebrew step will be skipped."
+            exit 0
+          fi
+          key="$RUNNER_TEMP/tap_deploy_key"
+          printf '%s\n' "$DEPLOY_KEY" | tr -d '\r' > "$key"
+          chmod 600 "$key"
+          if ! ssh-keygen -y -f "$key" > "$key.pub" 2>/dev/null; then
+            echo "::error::HOMEBREW_TAP_DEPLOY_KEY is not a valid unencrypted private key. Set it again from the private key file (not the .pub)."
+            exit 1
+          fi
+          echo "Deploy key fingerprint: $(ssh-keygen -lf "$key.pub")"
+          out=$(ssh -i "$key" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -F /dev/null -T git@github.com 2>&1 || true)
+          echo "$out"
+          case "$out" in
+            *"successfully authenticated"*) ;;
+            *) echo "::error::GitHub rejected HOMEBREW_TAP_DEPLOY_KEY. Its public key must be a write deploy key on brimblehq/homebrew-tap (compare the fingerprint above with gh repo deploy-key list --repo brimblehq/homebrew-tap)."; exit 1 ;;
+          esac
+          echo "HOMEBREW_TAP_KEY_PATH=$key" >> "$GITHUB_ENV"
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6
         with:
@@ -42,7 +57,6 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          HOMEBREW_TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
           INSTALL_SCRIPT_URL: ${{ vars.INSTALL_BUCKET && format('https://{0}.t3.tigrisfiles.io/install.sh', vars.INSTALL_BUCKET) || '' }}
 
   install-script:
@@ -72,7 +86,6 @@ jobs:
   verify-install:
     name: Verify install (${{ matrix.os }})
     needs: [release, install-script]
-    # Run after the S3 upload, or straight after the release when it was skipped.
     if: always() && needs.release.result == 'success' && needs.install-script.result != 'failure'
     strategy:
       fail-fast: false

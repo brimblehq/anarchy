@@ -2,18 +2,6 @@
 
 Official CLI for [Brimble](https://brimble.io).
 
-Authenticate with a **Brimble API key**. Every Core / Auth request sends:
-
-```http
-x-brimble-key: br_...
-```
-
-Optional team context on Core:
-
-```http
-x-brimble-team: <teamObjectId>
-```
-
 ## Install
 
 Homebrew (macOS, Linux):
@@ -216,51 +204,6 @@ internal/client/      HTTP + Core/Auth API methods
 internal/ui/          prompts, spinner, colors
 internal/output/      table / json printers
 internal/cmd/         cobra commands
-```
-
-## Release
-
-CI runs on every push/PR: vet, test, build, `shellcheck` on the install
-scripts and `goreleaser check`.
-
-To ship a version, tag and push:
-
-```bash
-git tag v0.2.0
-git push origin v0.2.0
-```
-
-[release.yml](.github/workflows/release.yml) then:
-
-1. **GitHub release** — GoReleaser builds macOS, Linux and Windows archives
-   (amd64 + arm64, with shell completions), `checksums.txt` and `install.sh`.
-2. **Homebrew** — pushes `Casks/brimble.rb` to the tap repo.
-3. **Tigris** — uploads `scripts/install.sh` to the install bucket.
-4. **Verify** — installs the tag with the published script on Ubuntu and
-   macOS and checks the version.
-
-One-time setup (Settings → Secrets and variables → Actions):
-
-| Name | Kind | Purpose |
-|------|------|---------|
-| `HOMEBREW_TAP_DEPLOY_KEY` | secret | Private SSH key whose public half is a write deploy key on `brimblehq/homebrew-tap` |
-| `AWS_ACCESS_KEY_ID` | secret | Tigris access key (`tid_…`) |
-| `AWS_SECRET_ACCESS_KEY` | secret | Tigris secret key (`tsec_…`) |
-| `INSTALL_BUCKET` | variable | Public Tigris bucket for `install.sh` |
-
-Any step whose settings are missing is skipped. The script is published at
-`https://<INSTALL_BUCKET>.t3.tigrisfiles.io/install.sh`; create the bucket as
-public (`--acl public-read`) so `curl` can read it.
-
-The repo must be public: Homebrew and the install script download archives
-from the GitHub release without credentials. The tap repo
-(`brimblehq/homebrew-tap`) must exist.
-
-Local dry-runs (GoReleaser is pulled via `go run` if you don’t have it installed):
-
-```bash
-make snapshot        # build dist/ (archives, checksums, cask) without publishing
-make release-dry-run # full pipeline without publish (needs a git repo + tag)
 ```
 
 ## License
