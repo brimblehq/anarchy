@@ -258,7 +258,7 @@ var gitDescribe = regexp.MustCompile(`-\d+-g[0-9a-f]+(-dirty)?$|-dirty$`)
 func Method(path, version, gopathBin string) string {
 	p := filepath.ToSlash(path)
 	switch {
-	case version == "" || version == "dev" || gitDescribe.MatchString(version):
+	case IsSourceVersion(version):
 		return MethodSource
 	case strings.Contains(p, "/Caskroom/") || strings.Contains(p, "/Cellar/"):
 		return MethodHomebrew

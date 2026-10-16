@@ -28,6 +28,8 @@ Windows: download the zip for your architecture from the
 
 Upgrade later with `brimble upgrade` (uses brew or `go install` when that's how
 it was installed; otherwise downloads, verifies and replaces itself).
+The CLI mentions new versions after a command finishes (at most once a day; off
+in CI and with `BRIMBLE_NO_UPDATE_NOTIFIER=1`).
 
 From source:
 

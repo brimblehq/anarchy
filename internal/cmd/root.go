@@ -214,9 +214,12 @@ func run(fn func(ctx context.Context) error) {
 
 // Execute runs the CLI and returns the process exit code.
 func Execute() int {
-	if err := NewRoot().Execute(); err != nil {
+	root := NewRoot()
+	notice := startUpdateNotice(root, os.Args[1:])
+	if err := root.Execute(); err != nil {
 		exitWithError(err)
 	}
+	notice()
 	return 0
 }
 
