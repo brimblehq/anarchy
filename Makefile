@@ -1,4 +1,4 @@
-.PHONY: build install test tidy snapshot release-dry-run
+.PHONY: build install test tidy snapshot release-dry-run release release-minor release-major
 
 BIN := bin/brimble
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
@@ -39,3 +39,13 @@ release-dry-run:
 		echo "Init git + tag (e.g. git tag v0.1.0) for a full release dry-run."; \
 		$(GORELEASER) release --snapshot --clean --skip=publish; \
 	fi
+
+# Tag the next version and push it; the release workflow does the rest.
+release:
+	sh scripts/release.sh patch
+
+release-minor:
+	sh scripts/release.sh minor
+
+release-major:
+	sh scripts/release.sh major
