@@ -137,3 +137,29 @@ func TestCreateEnvVarsBodyShape(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestNilBodySendsNothing(t *testing.T) {
+	var gotBody []byte
+	var gotType string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		gotType = r.Header.Get("Content-Type")
+		_ = json.NewEncoder(w).Encode(map[string]any{"message": "ok", "data": map[string]any{"logId": "L1"}})
+	}))
+	defer srv.Close()
+
+	core := &Core{http: NewHTTP(HTTPOptions{BaseURL: srv.URL})}
+	if _, err := core.RedeployProject(context.Background(), "p1", nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	if len(gotBody) != 0 || gotType != "" {
+		t.Fatalf("redeploy without settings sent body %q with Content-Type %q; Core rejects null", gotBody, gotType)
+	}
+
+	if _, err := core.RedeployProject(context.Background(), "p1", json.RawMessage(`{"startOnly":true}`), ""); err != nil {
+		t.Fatal(err)
+	}
+	if string(gotBody) != `{"startOnly":true}` || gotType != "application/json" {
+		t.Fatalf("body = %q, type = %q", gotBody, gotType)
+	}
+}

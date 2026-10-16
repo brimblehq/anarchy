@@ -161,6 +161,7 @@ func (c *HTTPClient) newRequest(ctx context.Context, req Request) (*http.Request
 	}
 
 	var bodyReader io.Reader
+	jsonBody := false
 	if req.rawBody != nil {
 		bodyReader = bytes.NewReader(req.rawBody)
 	} else if req.Body != nil {
@@ -168,7 +169,11 @@ func (c *HTTPClient) newRequest(ctx context.Context, req Request) (*http.Request
 		if err != nil {
 			return nil, fmt.Errorf("encode body: %w", err)
 		}
-		bodyReader = bytes.NewReader(b)
+		// A typed nil (nil json.RawMessage, map or pointer) marshals to "null",
+		// which Core's JSON parser rejects with a 500. Send no body instead.
+		if !bytes.Equal(b, []byte("null")) {
+			bodyReader, jsonBody = bytes.NewReader(b), true
+		}
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, req.Method, u.String(), bodyReader)
@@ -176,7 +181,7 @@ func (c *HTTPClient) newRequest(ctx context.Context, req Request) (*http.Request
 		return nil, err
 	}
 
-	if req.Body != nil {
+	if jsonBody {
 		httpReq.Header.Set("Content-Type", "application/json")
 	}
 	httpReq.Header.Set("Accept", "application/json")
