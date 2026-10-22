@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -81,7 +82,13 @@ Finished deployments print their full log and result.`,
 					return err
 				}
 				logID := argOr(args, 1)
-				if logID == "" {
+				if logID != "" {
+					d, err := findDeployment(ctx, ref, logID)
+					if err != nil {
+						return err
+					}
+					logID = d.ID
+				} else {
 					latest, err := coreClient.ListDeployLogs(ctx, ref.ID, url.Values{"limit": {"1"}}, cfg.TeamID)
 					if err != nil {
 						return err
@@ -323,7 +330,13 @@ terminal, the latest one is used).`,
 					return err
 				}
 				logID := argOr(args, 1)
-				if logID == "" {
+				if logID != "" {
+					d, err := findDeployment(ctx, ref, logID)
+					if err != nil {
+						return err
+					}
+					logID = d.ID
+				} else {
 					d, err := pickDeployment(ctx, ref, "Select a deployment", nil)
 					if err != nil {
 						return err
@@ -423,6 +436,33 @@ func deployments(list client.DeployLogList) []client.DeployLog {
 	return out
 }
 
+var fullObjectID = regexp.MustCompile(`^[0-9a-f]{24}$`)
+
+// findDeployment resolves a deployment ID, accepting the short IDs that
+// `brimble logs list` prints.
+func findDeployment(ctx context.Context, ref ProjectRef, id string) (client.DeployLog, error) {
+	if fullObjectID.MatchString(id) {
+		return client.DeployLog{ID: id}, nil
+	}
+	raw, err := coreClient.ListDeployLogs(ctx, ref.ID, url.Values{"limit": {"50"}}, cfg.TeamID)
+	if err != nil {
+		return client.DeployLog{}, err
+	}
+	var matches []client.DeployLog
+	for _, d := range deployments(raw) {
+		if strings.HasSuffix(d.ID, id) || strings.HasPrefix(d.ID, id) {
+			matches = append(matches, d)
+		}
+	}
+	switch len(matches) {
+	case 1:
+		return matches[0], nil
+	case 0:
+		return client.DeployLog{}, fmt.Errorf("no deployment %q among the last 50 of %s — see `brimble logs list %s`", id, ref.Display(), ref.Name)
+	}
+	return client.DeployLog{}, fmt.Errorf("%q matches more than one deployment of %s — use more of the ID", id, ref.Display())
+}
+
 func pickDeployment(ctx context.Context, ref ProjectRef, title string, keep func(client.DeployLog) bool) (client.DeployLog, error) {
 	var raw client.DeployLogList
 	err := ui.WithSpinner("Loading deployments…", func() error {
@@ -468,8 +508,12 @@ func printDeployList(project string, data client.DeployLogList) error {
 	}
 	rows := make([][]string, 0, len(list))
 	for _, d := range list {
+		msg := d.Message
+		if d.Source == "rollback" {
+			msg = "↩ rollback · " + msg
+		}
 		rows = append(rows, []string{
-			shortID(d.ID), ui.Status(d.Status), truncate(d.Message, 48), d.Branch, strings.ToLower(d.Environment), formatAgo(d.CreatedAt),
+			shortID(d.ID), ui.Status(d.Status), truncate(msg, 48), d.Branch, strings.ToLower(d.Environment), formatAgo(d.CreatedAt),
 		})
 	}
 	ui.Table([]string{"ID", "STATUS", "COMMIT", "BRANCH", "ENV", "CREATED"}, rows)
@@ -479,7 +523,7 @@ func printDeployList(project string, data client.DeployLogList) error {
 		ui.Muted("  Page %d of %d · --page to see more", max(1, data.CurrentPage), data.TotalPages)
 	}
 	fmt.Fprintln(os.Stdout)
-	ui.Muted("  IDs are shortened; use the full ID from -o json, or omit it to pick from a list")
+	ui.Muted("  Commands that take a deployment ID accept these short IDs")
 	return nil
 }
 

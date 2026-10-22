@@ -99,6 +99,10 @@ func printProjectView(p client.Project) error {
 			printKV("Last commit", truncate(firstLine(p.Log.Message), 80))
 		}
 		printKV("Serving", yesNo(p.ReplicaReady))
+		if p.AutoDeployPausedAt != "" {
+			printKV("Auto-deploy", ui.Yellow("paused since a rollback "+formatAgo(p.AutoDeployPausedAt)+
+				" — `brimble project auto-deploy resume`"))
+		}
 	}
 
 	if p.InstallCommand != "" || p.BuildCommand != "" || p.StartCommand != "" || p.RootDirectory != "" || p.OutputDirectory != "" {

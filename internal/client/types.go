@@ -36,6 +36,7 @@ type Project struct {
 	Specs                     *Specs       `json:"specs"`
 	Log                       *CommitLog   `json:"log"`
 	Health                    HealthStatus `json:"healthStatus"`
+	AutoDeployPausedAt        string       `json:"autoDeployPausedAt"` // set after a rollback
 	Domains                   []Named      `json:"domains"`
 	Environments              []Named      `json:"environments"`
 }
@@ -216,8 +217,32 @@ type LinkRepoSpec struct {
 }
 
 type RedeployRequest struct {
-	StartOnly bool   `json:"startOnly,omitempty"`
-	LogID     string `json:"logId,omitempty"`
+	StartOnly bool `json:"startOnly,omitempty"`
+}
+
+type RollbackResult struct {
+	LogID      string `json:"logId"`
+	RollbackOf string `json:"rollbackOf"`
+	Status     string `json:"status"`
+}
+
+type DuplicateProjectRequest struct {
+	EnvironmentID string `json:"environmentId"`
+	DomainSuffix  string `json:"domainSuffix,omitempty"`
+}
+
+type DuplicateProjectResult struct {
+	ProjectID      string `json:"projectId"`
+	EnvironmentID  string `json:"environmentId"`
+	DomainsCloned  int    `json:"domainsCloned"`
+	SkippedDomains []struct {
+		Name   string `json:"name"`
+		Reason string `json:"reason"`
+	} `json:"skippedDomains"`
+	CapacityFailures []struct {
+		ProjectName string `json:"projectName"`
+		Reason      string `json:"reason"`
+	} `json:"capacityFailures"`
 }
 
 type EnvList struct {
@@ -247,6 +272,9 @@ type DeployLog struct {
 	Username    string `json:"username"`
 	Environment string `json:"environment"`
 	CreatedAt   string `json:"createdAt"`
+	Source      string `json:"source"` // git, drop, rollback, …
+	// RollbackEligible: Core still has this deployment's image and variables.
+	RollbackEligible bool `json:"rollbackEligible"`
 }
 
 type RequestLogList struct {

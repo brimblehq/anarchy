@@ -25,6 +25,8 @@ func newProjectCmd() *cobra.Command {
 	cmd.AddCommand(newProjectCreateCmd())
 	cmd.AddCommand(newProjectRedeployCmd())
 	cmd.AddCommand(newProjectRollbackCmd())
+	cmd.AddCommand(newProjectAutoDeployCmd())
+	cmd.AddCommand(newProjectDuplicateCmd())
 	cmd.AddCommand(newProjectRestartCmd())
 	cmd.AddCommand(newProjectCancelCmd())
 	cmd.AddCommand(newProjectStartStopCmd("start"))
@@ -238,60 +240,6 @@ and push; preview a change first with "brimble config plan".`,
 	return cmd
 }
 
-func newProjectRollbackCmd() *cobra.Command {
-	var detach, yes bool
-
-	cmd := &cobra.Command{
-		Use:   "rollback [project] [deploymentId]",
-		Short: "Redeploy the commit of an earlier deployment",
-		Long: `Redeploy the commit of an earlier successful deployment.
-
-Without a deployment ID you pick one from recent successful deployments.`,
-		Args: cobra.RangeArgs(0, 2),
-		Run: func(cmd *cobra.Command, args []string) {
-			run(func(ctx context.Context) error {
-				ref, err := pickProject(ctx, argOr(args, 0))
-				if err != nil {
-					return err
-				}
-				target := client.DeployLog{ID: argOr(args, 1)}
-				if target.ID == "" {
-					if !ui.IsInteractive() {
-						return fmt.Errorf("deployment ID is required — see `brimble logs list %s`", ref.Name)
-					}
-					target, err = pickDeployment(ctx, ref, "Roll back to", func(d client.DeployLog) bool {
-						return deploySucceeded(d.Status) || d.Status == "SUPERSEDED"
-					})
-					if err != nil {
-						return err
-					}
-				}
-				label := shortID(target.ID)
-				if target.Message != "" {
-					label += " (" + truncate(target.Message, 50) + ")"
-				}
-				ok, err := confirmOrAbort(yes, fmt.Sprintf("Roll %s back to %s?", ref.Display(), label), false)
-				if err != nil || !ok {
-					return err
-				}
-				body, err := json.Marshal(client.RedeployRequest{LogID: target.ID})
-				if err != nil {
-					return err
-				}
-				logID, err := redeploy(ctx, ref, body, false)
-				if err != nil {
-					return err
-				}
-				return afterDeployStarted(ctx, ref, logID, detach, true)
-			})
-		},
-	}
-
-	cmd.Flags().BoolVarP(&detach, "detach", "d", false, "Don't follow the deployment")
-	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "Skip confirmation")
-	return cmd
-}
-
 func newProjectRestartCmd() *cobra.Command {
 	var detach bool
 	cmd := &cobra.Command{
@@ -333,7 +281,13 @@ func newProjectCancelCmd() *cobra.Command {
 					return err
 				}
 				logID := argOr(args, 1)
-				if logID == "" {
+				if logID != "" {
+					d, err := findDeployment(ctx, ref, logID)
+					if err != nil {
+						return err
+					}
+					logID = d.ID
+				} else {
 					d, err := pickDeployment(ctx, ref, "Cancel which deployment?", func(d client.DeployLog) bool {
 						return !deployFinished(d.Status)
 					})

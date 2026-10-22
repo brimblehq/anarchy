@@ -148,6 +148,41 @@ func (c *Core) DatabaseInsights(ctx context.Context, projectID, teamID string) (
 	return data, err
 }
 
+// Rollback puts an earlier deployment's image and environment variables back
+// live without rebuilding. Core pauses auto-deploy on push until
+// ResumeAutoDeploy or the next manual deploy.
+func (c *Core) Rollback(ctx context.Context, projectID, logID, teamID string) (RollbackResult, error) {
+	var data RollbackResult
+	_, err := c.http.DoJSON(ctx, Request{
+		Method: http.MethodPost,
+		Path:   "/v1/projects/" + url.PathEscape(projectID) + "/rollback/" + url.PathEscape(logID),
+		TeamID: teamID,
+	}, &data)
+	return data, err
+}
+
+func (c *Core) ResumeAutoDeploy(ctx context.Context, projectID, teamID string) error {
+	_, err := c.http.DoJSON(ctx, Request{
+		Method: http.MethodPost,
+		Path:   "/v1/projects/" + url.PathEscape(projectID) + "/auto-deploy/resume",
+		TeamID: teamID,
+	}, nil)
+	return err
+}
+
+// DuplicateProject copies a project, its variables and domains into another
+// environment and starts its first deploy.
+func (c *Core) DuplicateProject(ctx context.Context, projectID string, req DuplicateProjectRequest, teamID string) (DuplicateProjectResult, error) {
+	var data DuplicateProjectResult
+	_, err := c.http.DoJSON(ctx, Request{
+		Method: http.MethodPost,
+		Path:   "/v1/projects/" + url.PathEscape(projectID) + "/duplicate",
+		Body:   req,
+		TeamID: teamID,
+	}, &data)
+	return data, err
+}
+
 func (c *Core) StartProject(ctx context.Context, projectID, teamID string) (json.RawMessage, error) {
 	return c.projectAction(ctx, projectID, "start", teamID)
 }

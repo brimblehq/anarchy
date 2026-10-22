@@ -163,3 +163,39 @@ func TestNilBodySendsNothing(t *testing.T) {
 		t.Fatalf("body = %q, type = %q", gotBody, gotType)
 	}
 }
+
+func TestRollbackAndDuplicateRequests(t *testing.T) {
+	var got []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		got = append(got, r.Method+" "+r.URL.Path+" "+r.Header.Get("x-brimble-team")+" "+string(body))
+		data := map[string]any{"logId": "L2", "rollbackOf": "L1", "status": "queued", "projectId": "p2", "domainsCloned": 1}
+		_ = json.NewEncoder(w).Encode(map[string]any{"message": "ok", "data": data})
+	}))
+	defer srv.Close()
+
+	core := &Core{http: NewHTTP(HTTPOptions{BaseURL: srv.URL})}
+	ctx := context.Background()
+	rb, err := core.Rollback(ctx, "p1", "L1", "t1")
+	if err != nil || rb.LogID != "L2" || rb.RollbackOf != "L1" {
+		t.Fatalf("Rollback = %+v, %v", rb, err)
+	}
+	if err := core.ResumeAutoDeploy(ctx, "p1", ""); err != nil {
+		t.Fatal(err)
+	}
+	dup, err := core.DuplicateProject(ctx, "p1", DuplicateProjectRequest{EnvironmentID: "e1"}, "")
+	if err != nil || dup.ProjectID != "p2" || dup.DomainsCloned != 1 {
+		t.Fatalf("DuplicateProject = %+v, %v", dup, err)
+	}
+
+	want := []string{
+		"POST /v1/projects/p1/rollback/L1 t1 ",
+		"POST /v1/projects/p1/auto-deploy/resume  ",
+		`POST /v1/projects/p1/duplicate  {"environmentId":"e1"}`,
+	}
+	for i := range want {
+		if i >= len(got) || got[i] != want[i] {
+			t.Fatalf("request %d = %q, want %q", i, got, want[i])
+		}
+	}
+}
