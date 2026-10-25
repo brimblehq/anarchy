@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/brimblehq/anarchy/internal/auth"
 )
@@ -192,6 +193,43 @@ func TestRollbackAndDuplicateRequests(t *testing.T) {
 		"POST /v1/projects/p1/rollback/L1 t1 ",
 		"POST /v1/projects/p1/auto-deploy/resume  ",
 		`POST /v1/projects/p1/duplicate  {"environmentId":"e1"}`,
+	}
+	for i := range want {
+		if i >= len(got) || got[i] != want[i] {
+			t.Fatalf("request %d = %q, want %q", i, got, want[i])
+		}
+	}
+}
+
+func TestPITRRequests(t *testing.T) {
+	var got []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		got = append(got, r.Method+" "+r.URL.Path+" "+string(body))
+		_ = json.NewEncoder(w).Encode(map[string]any{"message": "ok", "data": map[string]any{"pitr_enabled": true}})
+	}))
+	defer srv.Close()
+
+	core := &Core{http: NewHTTP(HTTPOptions{BaseURL: srv.URL})}
+	ctx := context.Background()
+	on := true
+	dest := &BackupDestination{Type: "brimble", BucketID: "b1"}
+	if _, err := core.UpdateBackupSettings(ctx, "d1", UpdateBackupSettingsRequest{PITREnabled: &on, Destination: dest}, ""); err != nil {
+		t.Fatal(err)
+	}
+	off := false
+	if _, err := core.UpdateBackupSettings(ctx, "d1", UpdateBackupSettingsRequest{PITREnabled: &off}, ""); err != nil {
+		t.Fatal(err)
+	}
+	at := time.Date(2026, 10, 25, 6, 30, 0, 0, time.FixedZone("WAT", 3600))
+	if _, err := core.RestoreToPointInTime(ctx, "d1", at, "", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{
+		`PATCH /v1/projects/database/d1/backup-settings {"pitr_enabled":true,"destination":{"type":"brimble","bucket_id":"b1"}}`,
+		`PATCH /v1/projects/database/d1/backup-settings {"pitr_enabled":false}`,
+		`POST /v1/projects/database/d1/pitr/restore {"target_time":"2026-10-25T05:30:00Z"}`,
 	}
 	for i := range want {
 		if i >= len(got) || got[i] != want[i] {

@@ -91,7 +91,8 @@ func printProjectView(p client.Project) error {
 
 	if isDB {
 		fmt.Fprintln(os.Stdout)
-		ui.Muted("  Connection details, backups and users are in the dashboard: https://app.brimble.io")
+		ui.Muted("  Backups: `brimble db backups %s` · point-in-time recovery: `brimble db pitr status %s`", p.Name, p.Name)
+		ui.Muted("  Connection details and users are in the dashboard: https://app.brimble.io")
 	} else {
 		ui.Section("Deploy")
 		printKV("Health", formatHealth(p.Health))

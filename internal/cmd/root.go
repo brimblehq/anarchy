@@ -108,7 +108,7 @@ Inside a linked directory, commands default to the linked project, so
 		newDeployCmd(), newStatusCmd(), newOpenCmd(), newLogCmd(),
 	)
 	add(groupManage,
-		newProjectCmd(), newConfigCmd(), newEnvCmd(), newDomainCmd(), newEnvironmentCmd(),
+		newProjectCmd(), newDatabaseCmd(), newConfigCmd(), newEnvCmd(), newDomainCmd(), newEnvironmentCmd(),
 		newTeamCmd(), newMetaCmd(), newAuthCmd(), newUpgradeCmd(),
 	)
 	root.SetHelpCommandGroupID(groupManage)

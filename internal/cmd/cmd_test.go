@@ -208,3 +208,27 @@ func TestFormatSince(t *testing.T) {
 		}
 	}
 }
+
+func TestParseRestoreTime(t *testing.T) {
+	now := time.Date(2026, 10, 25, 7, 0, 0, 0, time.UTC)
+	cases := map[string]time.Time{
+		"15m":                       now.Add(-15 * time.Minute),
+		"2h ago":                    now.Add(-2 * time.Hour),
+		"1d":                        now.Add(-24 * time.Hour),
+		"90s":                       now.Add(-90 * time.Second),
+		"2026-10-25 06:30":          time.Date(2026, 10, 25, 6, 30, 0, 0, time.UTC),
+		"2026-10-25T06:30:15":       time.Date(2026, 10, 25, 6, 30, 15, 0, time.UTC),
+		"2026-10-25T07:30:00+01:00": time.Date(2026, 10, 25, 6, 30, 0, 0, time.UTC),
+	}
+	for in, want := range cases {
+		got, err := parseRestoreTime(in, now)
+		if err != nil || !got.Equal(want) {
+			t.Errorf("parseRestoreTime(%q) = %v, %v; want %v", in, got, err, want)
+		}
+	}
+	for _, bad := range []string{"", "yesterday", "15", "2026-10-25"} {
+		if _, err := parseRestoreTime(bad, now); err == nil {
+			t.Errorf("parseRestoreTime(%q) should fail", bad)
+		}
+	}
+}
