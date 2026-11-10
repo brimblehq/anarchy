@@ -198,11 +198,9 @@ In per_job mode a size and region are required.`,
 				}
 
 				if mode == "per_job" {
-					if region == "" {
-						region, err = pickSandboxRegion(ctx)
-						if err != nil {
-							return err
-						}
+					region, err = resolveSandboxRegion(ctx, region)
+					if err != nil {
+						return err
 					}
 					if size == "" {
 						size, err = pickSandboxSize(ctx, region)
@@ -357,7 +355,11 @@ func buildUpdateRequest(ctx context.Context, runner client.CiRunner, name, mode,
 			body.Size = size
 		}
 		if region != "" {
-			body.Region = region
+			regionID, err := resolveSandboxRegion(ctx, region)
+			if err != nil {
+				return body, err
+			}
+			body.Region = regionID
 		}
 		if maxConcurrency > 0 {
 			body.MaxConcurrency = maxConcurrency
@@ -684,11 +686,9 @@ runner. Attach an existing ready sandbox, or create a fresh one.`,
 
 				var body client.AttachCiRunnerSandboxRequest
 				if createNew {
-					if region == "" {
-						region, err = pickSandboxRegion(ctx)
-						if err != nil {
-							return err
-						}
+					region, err = resolveSandboxRegion(ctx, region)
+					if err != nil {
+						return err
 					}
 					if size == "" {
 						size, err = pickSandboxSize(ctx, region)
@@ -841,8 +841,9 @@ func resolveGitAccount(ctx context.Context, arg string) (client.GitAccount, erro
 	return pickGitAccount(accounts)
 }
 
-// pickSandboxRegion resolves a sandbox region for CI runners and sandbox attach.
-func pickSandboxRegion(ctx context.Context) (string, error) {
+// resolveSandboxRegion returns the ID of the sandbox region named by the
+// --region flag (a name or an ID). With no flag it asks, when interactive.
+func resolveSandboxRegion(ctx context.Context, requested string) (string, error) {
 	var regions []client.SandboxRegion
 	err := ui.WithSpinner("Loading regions…", func() error {
 		var err error
@@ -854,6 +855,16 @@ func pickSandboxRegion(ctx context.Context) (string, error) {
 	}
 	if len(regions) == 0 {
 		return "", fmt.Errorf("no sandbox regions are available on your account")
+	}
+	if requested != "" {
+		names := make([]string, 0, len(regions))
+		for _, r := range regions {
+			if r.ID == requested || strings.EqualFold(r.Name, requested) {
+				return r.ID, nil
+			}
+			names = append(names, r.Name)
+		}
+		return "", fmt.Errorf("unknown sandbox region %q — available: %s", requested, strings.Join(names, ", "))
 	}
 	if !ui.IsInteractive() {
 		return "", fmt.Errorf("--region is required")
