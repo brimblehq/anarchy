@@ -35,7 +35,7 @@ func isObjectID(s string) bool {
 // else the project linked to the working directory, else an interactive picker.
 func pickProject(ctx context.Context, arg string) (ProjectRef, error) {
 	if arg != "" {
-		return fetchProject(ctx, arg)
+		return fetchProject(ctx, arg, "")
 	}
 	if linked != nil {
 		return ProjectRef{ID: linked.ProjectID, Name: linked.ProjectName}, nil
@@ -72,9 +72,12 @@ func selectProject(title string, projects []ProjectRef) (ProjectRef, error) {
 	return byID[id], nil
 }
 
-func fetchProject(ctx context.Context, nameOrID string) (ProjectRef, error) {
+func fetchProject(ctx context.Context, nameOrID, display string) (ProjectRef, error) {
+	if display == "" {
+		display = nameOrID
+	}
 	var project client.Project
-	err := ui.WithSpinner("Loading "+nameOrID+"…", func() error {
+	err := ui.WithSpinner("Loading "+display+"…", func() error {
 		var err error
 		project, err = coreClient.GetProject(ctx, nameOrID, cfg.TeamID)
 		return err
@@ -82,13 +85,13 @@ func fetchProject(ctx context.Context, nameOrID string) (ProjectRef, error) {
 	if err != nil {
 		var apiErr *client.APIError
 		if errors.As(err, &apiErr) && apiErr.Status == http.StatusNotFound {
-			return ProjectRef{}, fmt.Errorf("project %q not found%s — see `brimble project list`", nameOrID, teamSuffix())
+			return ProjectRef{}, fmt.Errorf("project %q not found%s — see `brimble project list`", display, teamSuffix())
 		}
 		return ProjectRef{}, err
 	}
 	ref := ProjectRef{ID: project.ProjectID(), Name: project.Name, Status: project.Status, Project: &project}
 	if ref.ID == "" {
-		return ProjectRef{}, fmt.Errorf("project %q: response has no id", nameOrID)
+		return ProjectRef{}, fmt.Errorf("project %q: response has no id", display)
 	}
 	return ref, nil
 }
@@ -97,7 +100,7 @@ func projectData(ctx context.Context, ref *ProjectRef) (client.Project, error) {
 	if ref.Project != nil {
 		return *ref.Project, nil
 	}
-	full, err := fetchProject(ctx, ref.ID)
+	full, err := fetchProject(ctx, ref.ID, ref.Name)
 	if err != nil {
 		return client.Project{}, err
 	}

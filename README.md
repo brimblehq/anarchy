@@ -128,6 +128,31 @@ brimble deploy my-api --detach -o json   # {"projectId": ..., "logId": ...}
 brimble env set my-api RELEASE=$GIT_SHA
 ```
 
+## Interactive terminal (SSH)
+
+Open an interactive shell on a running project (web-service or worker) or a
+sandbox — a native, raw-terminal session that streams stdin/stdout and follows
+your terminal resize:
+
+```bash
+brimble ssh my-api                 # pick or name a project
+brimble ssh --sandbox my-sandbox   # pick or name a sandbox
+```
+
+## CI runners
+
+Run a GitHub organization's Actions jobs on Brimble sandboxes:
+
+```bash
+brimble ci list                                  # runners in this workspace
+brimble ci create --account acme --mode per_job   # wizard, or pass flags
+brimble ci jobs my-runner                        # job history
+brimble ci logs my-runner <job-id>               # a job's logs
+brimble ci sandbox attach my-runner              # reuse-mode runners
+```
+
+CI runners need a paid plan and a GitHub organization (not a personal account).
+
 ## Global flags
 
 | Flag | Env | Default |

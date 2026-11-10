@@ -76,7 +76,7 @@ func runCreate(ctx context.Context, draft *createDraft, opts createOptions) erro
 		if err != nil {
 			return err
 		}
-		ref, err = fetchProject(ctx, draft.Name)
+		ref, err = fetchProject(ctx, draft.Name, "")
 		if err != nil {
 			return err
 		}
