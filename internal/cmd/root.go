@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"time"
 
@@ -237,16 +239,43 @@ func exitWithError(err error) {
 // friendlyError adds a next step to errors users can act on.
 func friendlyError(err error) error {
 	var apiErr *client.APIError
-	if !errors.As(err, &apiErr) {
-		return err
+	if errors.As(err, &apiErr) {
+		switch apiErr.Status {
+		case http.StatusUnauthorized:
+			return fmt.Errorf("%w\n  Your API key is invalid or expired — run `brimble login` to use a new one", err)
+		case http.StatusForbidden:
+			return fmt.Errorf("%w\n  Your API key or team role lacks permission for this action", err)
+		}
 	}
-	switch apiErr.Status {
-	case http.StatusUnauthorized:
-		return fmt.Errorf("%w\n  Your API key is invalid or expired — run `brimble login` to use a new one", err)
-	case http.StatusForbidden:
-		return fmt.Errorf("%w\n  Your API key or team role lacks permission for this action", err)
+	if clean := sanitizeNetworkError(err); clean != nil {
+		return clean
 	}
 	return err
+}
+
+// sanitizeNetworkError rewrites a failed TCP connection so it names the host
+// and the reason without exposing the raw socket addresses Go embeds in
+// net.OpError (for example "172.16.0.2:53583->34.36.222.221:443"). It returns
+// nil for errors that are not connection failures.
+func sanitizeNetworkError(err error) error {
+	var opErr *net.OpError
+	if !errors.As(err, &opErr) {
+		return nil
+	}
+
+	reason := opErr.Err.Error()
+	var sysErr *os.SyscallError
+	if errors.As(opErr.Err, &sysErr) {
+		reason = sysErr.Err.Error()
+	}
+
+	var uerr *url.Error
+	if errors.As(err, &uerr) {
+		if u, e := url.Parse(uerr.URL); e == nil && u.Host != "" {
+			return fmt.Errorf("could not reach %s: %s", u.Host, reason)
+		}
+	}
+	return fmt.Errorf("connection failed: %s", reason)
 }
 
 // confirmOrAbort asks before an action. It returns false when the user
