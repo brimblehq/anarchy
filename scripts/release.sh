@@ -4,7 +4,7 @@
 #   scripts/release.sh [patch|minor|major|vX.Y.Z] [-y]
 set -eu
 
-bump=patch
+bump="patch"
 yes=0
 for arg in "$@"; do
 	case "$arg" in
