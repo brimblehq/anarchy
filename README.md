@@ -146,12 +146,13 @@ Run a GitHub organization's Actions jobs on Brimble sandboxes:
 ```bash
 brimble ci list                                  # runners in this workspace
 brimble ci create --account acme --mode per_job   # wizard, or pass flags
+brimble ci create --provider circleci --resource-class acme/brimble   # CircleCI; asks for the token
 brimble ci jobs my-runner                        # job history
 brimble ci logs my-runner <job-id>               # a job's logs
 brimble ci sandbox attach my-runner              # reuse-mode runners
 ```
 
-CI runners need a paid plan and a GitHub organization (not a personal account).
+CI runners need a plan that includes them. GitHub runners need a GitHub organization (not a personal account); CircleCI runners need a resource class and its token, which is read from a prompt or from stdin with `--token-stdin`.
 
 ## Global flags
 
