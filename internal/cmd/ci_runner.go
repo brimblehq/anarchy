@@ -4,9 +4,11 @@ import (
 	"cmp"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/brimblehq/anarchy/internal/client"
 	"github.com/brimblehq/anarchy/internal/ui"
@@ -76,8 +78,8 @@ func pickCiRunner(ctx context.Context, arg string) (client.CiRunner, error) {
 	byID := map[string]client.CiRunner{}
 	for _, r := range runners {
 		label := r.Name
-		if r.AccountLogin != "" {
-			label += "  " + ui.Dim("@"+r.AccountLogin)
+		if target := runnerTarget(r); target != "" {
+			label += "  " + ui.Dim(target)
 		}
 		opts = append(opts, ui.Option{Label: label, Value: r.ID})
 		byID[r.ID] = r
@@ -132,13 +134,14 @@ func printCiRunnerList(list client.CiRunnerList) {
 		rows = append(rows, []string{
 			shortID(r.ID),
 			r.Name,
-			r.AccountLogin,
+			runnerProvider(r.Provider),
+			runnerTarget(r),
 			runnerMode(r.Mode),
 			runnerStatus(r.Enabled),
 			formatAgo(r.CreatedAt),
 		})
 	}
-	ui.Table([]string{"ID", "NAME", "GITHUB ORG", "MODE", "STATUS", "CREATED"}, rows)
+	ui.Table([]string{"ID", "NAME", "PROVIDER", "TARGET", "MODE", "STATUS", "CREATED"}, rows)
 	if list.TotalPages > 1 {
 		fmt.Fprintln(os.Stdout)
 		ui.Muted("  Page %d of %d · --page to see more", max(1, list.CurrentPage), list.TotalPages)
@@ -147,23 +150,37 @@ func printCiRunnerList(list client.CiRunnerList) {
 }
 
 func newCIRunnerCreateCmd() *cobra.Command {
-	var name, account, mode, size, region string
+	var name, account, mode, size, region, provider, resourceClass string
 	var maxConcurrency int
-	var yes bool
+	var yes, tokenStdin bool
 
 	cmd := &cobra.Command{
 		Use:   "create",
-		Short: "Create a CI runner for a GitHub organization",
-		Long: `Create a CI runner so a GitHub organization's Actions jobs run on Brimble
-sandboxes.
+		Short: "Create a CI runner for GitHub Actions or CircleCI",
+		Long: `Create a CI runner so a GitHub organization's Actions jobs, or the jobs of a
+CircleCI resource class, run on Brimble sandboxes.
 
-Requires a GitHub organization connected to your account and a paid plan.
-In per_job mode a size and region are required.`,
-		Example: `  brimble ci create --account acme --name ci --mode per_job --size sbx.micro --region us-east-1
-  brimble ci create --account acme --mode reuse`,
+GitHub needs an organization connected to your account. In per_job mode a
+size and region are required.
+
+CircleCI needs a resource class and its token. The token is read from a
+prompt, or from stdin with --token-stdin; it is never a flag. CircleCI
+runners always use long-lived sandboxes.`,
+		Example: `  brimble ci create --account acme --name ci --mode per_job --size sbx.micro --region <region>
+  brimble ci create --account acme --mode reuse
+  brimble ci create --provider circleci --resource-class acme/brimble --name circle
+  cat token.txt | brimble ci create --provider circleci --resource-class acme/brimble --name circle --token-stdin -y`,
 		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			run(func(ctx context.Context) error {
+				chosen, err := pickRunnerProvider(provider, resourceClass)
+				if err != nil {
+					return err
+				}
+				if chosen == providerCircleCI {
+					return createCircleCiRunner(ctx, name, resourceClass, tokenStdin, yes)
+				}
+
 				acct, err := resolveGitAccount(ctx, account)
 				if err != nil {
 					return err
@@ -243,6 +260,9 @@ In per_job mode a size and region are required.`,
 	}
 
 	cmd.Flags().StringVar(&name, "name", "", "Runner name (default: <org>-runner)")
+	cmd.Flags().StringVar(&provider, "provider", "", "CI provider: github or circleci (default: github)")
+	cmd.Flags().StringVar(&resourceClass, "resource-class", "", "CircleCI resource class, as namespace/name")
+	cmd.Flags().BoolVar(&tokenStdin, "token-stdin", false, "Read the CircleCI resource class token from stdin")
 	cmd.Flags().StringVar(&account, "account", "", "GitHub organization (username or name)")
 	cmd.Flags().StringVar(&mode, "mode", "", "Mode: per_job or reuse")
 	cmd.Flags().StringVar(&size, "size", "", "Sandbox size for per_job mode (e.g. sbx.micro)")
@@ -254,6 +274,91 @@ In per_job mode a size and region are required.`,
 	cmd.RegisterFlagCompletionFunc("size", completeSandboxSizeNames)
 	cmd.RegisterFlagCompletionFunc("region", completeSandboxRegionNames)
 	return cmd
+}
+
+// pickRunnerProvider resolves the provider from --provider, from a CircleCI
+// flag being set, or by asking.
+func pickRunnerProvider(provider, resourceClass string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "github":
+		return providerGitHub, nil
+	case "circleci":
+		return providerCircleCI, nil
+	case "":
+	default:
+		return "", fmt.Errorf("--provider must be github or circleci")
+	}
+	if resourceClass != "" {
+		return providerCircleCI, nil
+	}
+	if !ui.IsInteractive() {
+		return providerGitHub, nil
+	}
+	return ui.Select("CI provider", []ui.Option{
+		{Label: "GitHub Actions", Value: providerGitHub},
+		{Label: "CircleCI", Value: providerCircleCI},
+	})
+}
+
+func createCircleCiRunner(ctx context.Context, name, resourceClass string, tokenStdin, yes bool) error {
+	var err error
+	resourceClass = strings.TrimSpace(resourceClass)
+	if resourceClass == "" && ui.IsInteractive() && !tokenStdin {
+		resourceClass, err = ui.Text("Resource class", "namespace/name", "")
+		if err != nil {
+			return err
+		}
+		resourceClass = strings.TrimSpace(resourceClass)
+	}
+	if resourceClass == "" {
+		return fmt.Errorf("--resource-class is required for CircleCI")
+	}
+
+	if name == "" && ui.IsInteractive() && !tokenStdin {
+		name, err = ui.Text("Runner name", "runs CircleCI jobs", "circleci-runner")
+		if err != nil {
+			return err
+		}
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("--name is required")
+	}
+
+	token, err := readRunnerToken(tokenStdin)
+	if err != nil {
+		return err
+	}
+
+	// stdin carried the token, so there is no terminal left to confirm on.
+	ok, err := confirmOrAbort(yes || tokenStdin, fmt.Sprintf("Create CI runner %q for the CircleCI resource class %s?", name, resourceClass), false)
+	if err != nil || !ok {
+		return err
+	}
+
+	var runner client.CiRunner
+	err = ui.WithSpinner("Creating CI runner…", func() error {
+		var err error
+		runner, err = coreClient.CreateCiRunner(ctx, client.CreateCiRunnerRequest{
+			Name:          name,
+			Provider:      providerCircleCI,
+			ResourceClass: resourceClass,
+			Token:         token,
+			Mode:          "reuse",
+		}, cfg.TeamID)
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	if jsonOutput() {
+		return printResult(runner)
+	}
+	ui.Success("Created CI runner %s", runner.Name)
+	printCiRunnerDetail(runner)
+	ui.Muted("  Attach a sandbox to start running jobs: brimble ci sandbox attach %s", runner.Name)
+	fmt.Fprintln(os.Stdout)
+	return nil
 }
 
 func newCIRunnerGetCmd() *cobra.Command {
@@ -282,13 +387,16 @@ func newCIRunnerGetCmd() *cobra.Command {
 func newCIRunnerUpdateCmd() *cobra.Command {
 	var name, mode, size, region string
 	var maxConcurrency int
-	var enable, disable bool
+	var enable, disable, tokenStdin bool
 
 	cmd := &cobra.Command{
 		Use:   "update [runner]",
 		Short: "Update a CI runner",
 		Long: `Update a CI runner's name, mode, size, region or concurrency, or pause it
-with --disable. With no flags you can change fields interactively.`,
+with --disable. With no flags you can change fields interactively.
+
+For a CircleCI runner, --token-stdin replaces the resource class token and
+restarts the runner in its attached sandboxes.`,
 		Args:              cobra.MaximumNArgs(1),
 		ValidArgsFunction: completeRunnerArg,
 		Run: func(cmd *cobra.Command, args []string) {
@@ -298,7 +406,12 @@ with --disable. With no flags you can change fields interactively.`,
 					return err
 				}
 
-				body, err := buildUpdateRequest(ctx, runner, name, mode, size, region, maxConcurrency, enable, disable)
+				var body client.UpdateCiRunnerRequest
+				if tokenStdin {
+					body.Token, err = readRunnerToken(true)
+				} else {
+					body, err = buildUpdateRequest(ctx, runner, name, mode, size, region, maxConcurrency, enable, disable)
+				}
 				if err != nil {
 					return err
 				}
@@ -329,6 +442,7 @@ with --disable. With no flags you can change fields interactively.`,
 	cmd.Flags().IntVar(&maxConcurrency, "max-concurrency", 0, "Maximum concurrent jobs")
 	cmd.Flags().BoolVar(&enable, "enable", false, "Enable the runner")
 	cmd.Flags().BoolVar(&disable, "disable", false, "Disable the runner")
+	cmd.Flags().BoolVar(&tokenStdin, "token-stdin", false, "Replace a CircleCI runner's token, read from stdin")
 	cmd.MarkFlagsMutuallyExclusive("enable", "disable")
 	cmd.RegisterFlagCompletionFunc("mode", completeModes)
 	cmd.RegisterFlagCompletionFunc("size", completeSandboxSizeNames)
@@ -718,7 +832,10 @@ runner. Attach an existing ready sandbox, or create a fresh one.`,
 				err = ui.WithSpinner("Attaching sandbox…", func() error {
 					var err error
 					attached, err = coreClient.AttachCiRunnerSandbox(ctx, runner.ID, body, cfg.TeamID)
-					return err
+					if err != nil {
+						return err
+					}
+					return waitForAttach(ctx, runner.ID, attached.SandboxID)
 				})
 				if err != nil {
 					return err
@@ -914,13 +1031,101 @@ func pickSandboxSize(ctx context.Context, region string) (string, error) {
 
 func printCiRunnerDetail(r client.CiRunner) {
 	ui.Title(r.Name)
-	printKV("GitHub org", r.AccountLogin)
+	printKV("Provider", runnerProvider(r.Provider))
+	if r.Provider == providerCircleCI {
+		printKV("Resource class", r.ResourceClass)
+	} else {
+		printKV("GitHub org", r.AccountLogin)
+	}
 	printKV("Mode", runnerMode(r.Mode))
 	printKV("Size", r.Size)
 	printKV("Max concurrency", strconv.Itoa(r.MaxConcurrency))
 	printKV("Status", runnerStatus(r.Enabled))
 	printKV("Created", formatAgo(r.CreatedAt))
 	fmt.Fprintln(os.Stdout)
+}
+
+const (
+	providerGitHub   = "GITHUB"
+	providerCircleCI = "CIRCLECI"
+	attachPollEvery  = 3 * time.Second
+	attachWaitLimit  = 3 * time.Minute
+)
+
+func runnerProvider(provider string) string {
+	if provider == providerCircleCI {
+		return "CircleCI"
+	}
+	return "GitHub"
+}
+
+// runnerTarget is what a runner serves: a GitHub organization or a CircleCI
+// resource class.
+func runnerTarget(r client.CiRunner) string {
+	if r.Provider == providerCircleCI {
+		return r.ResourceClass
+	}
+	if r.AccountLogin == "" {
+		return ""
+	}
+	return "@" + r.AccountLogin
+}
+
+// readRunnerToken reads a CircleCI resource class token from stdin when asked,
+// or prompts for it, so it never has to be passed as a flag.
+func readRunnerToken(fromStdin bool) (string, error) {
+	if fromStdin {
+		raw, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			return "", err
+		}
+		token := strings.TrimSpace(string(raw))
+		if token == "" {
+			return "", fmt.Errorf("no token on stdin")
+		}
+		return token, nil
+	}
+	if !ui.IsInteractive() {
+		return "", fmt.Errorf("pass the resource class token on stdin with --token-stdin")
+	}
+	token, err := ui.Password("Resource class token", "from `circleci runner resource-class create --generate-token`")
+	if err != nil {
+		return "", err
+	}
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return "", fmt.Errorf("a resource class token is required")
+	}
+	return token, nil
+}
+
+// waitForAttach polls until the runner in a sandbox is online. Attaching
+// finishes in the background after the API call returns.
+func waitForAttach(ctx context.Context, runnerID, sandboxID string) error {
+	deadline := time.Now().Add(attachWaitLimit)
+	for time.Now().Before(deadline) {
+		sandboxes, err := coreClient.ListCiRunnerSandboxes(ctx, runnerID, cfg.TeamID)
+		if err != nil {
+			return err
+		}
+		for _, sandbox := range sandboxes {
+			if sandbox.SandboxID != sandboxID {
+				continue
+			}
+			if sandbox.Status == "online" {
+				return nil
+			}
+			if sandbox.Status == "offline" {
+				return fmt.Errorf("the runner did not start: %s\n  Detach it with `brimble ci sandbox detach` and try again", strings.TrimSpace(sandbox.Error))
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(attachPollEvery):
+		}
+	}
+	return fmt.Errorf("the runner is still starting — check `brimble ci sandbox list`")
 }
 
 func runnerMode(mode string) string {

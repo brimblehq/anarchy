@@ -7,10 +7,10 @@ import (
 	"strconv"
 )
 
-// CI runners let a GitHub organization run its Actions jobs on Brimble
-// sandboxes instead of GitHub-hosted runners.
+// CI runners let a GitHub organization or a CircleCI resource class run its
+// jobs on Brimble sandboxes.
 //
-// Two modes:
+// Two modes (CircleCI runners are always reuse):
 //   - reuse:   a fixed set of attached sandboxes runs jobs (GitHub "self-hosted")
 //   - per_job: a fresh sandbox is provisioned for each queued job
 
@@ -21,6 +21,7 @@ type CiRunner struct {
 	Provider       string `json:"provider"`
 	InstallationID int    `json:"installation_id"`
 	AccountLogin   string `json:"account_login"`
+	ResourceClass  string `json:"resource_class"`
 	Mode           string `json:"mode"` // reuse | per_job
 	Size           string `json:"size"`
 	Region         string `json:"region"`
@@ -81,7 +82,10 @@ type CiRunnerJobLogs struct {
 
 type CreateCiRunnerRequest struct {
 	Name           string `json:"name"`
-	InstallationID int    `json:"installationId"`
+	Provider       string `json:"provider,omitempty"`
+	InstallationID int    `json:"installationId,omitempty"`
+	ResourceClass  string `json:"resourceClass,omitempty"`
+	Token          string `json:"token,omitempty"`
 	Mode           string `json:"mode"`
 	Size           string `json:"size,omitempty"`
 	Region         string `json:"region,omitempty"`
@@ -95,6 +99,7 @@ type UpdateCiRunnerRequest struct {
 	Region         string `json:"region,omitempty"`
 	MaxConcurrency int    `json:"maxConcurrency,omitempty"`
 	Enabled        *bool  `json:"enabled,omitempty"`
+	Token          string `json:"token,omitempty"`
 }
 
 type NewCiRunnerSandboxInput struct {
